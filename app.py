@@ -5,6 +5,7 @@ import uuid
 import json
 from datetime import timedelta
 import boto3
+from flask_cors import CORS
 
 from flask import Flask, request, redirect, url_for, session, jsonify, send_file
 from werkzeug.utils import secure_filename
@@ -91,6 +92,7 @@ class S3SessionInterface(SessionInterface):
 
 # Create Flask app
 app = Flask(__name__)
+CORS(app)
 # Although app.secret_key is less critical with server-side sessions,
 # it is still used for securely signing the session cookie.
 app.secret_key = os.environ.get("SESSION_SECRET", "dev-secret-key")
