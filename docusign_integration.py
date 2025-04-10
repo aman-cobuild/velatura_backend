@@ -200,7 +200,7 @@ def get_document_for_signing(access_token, account_id, envelope_id, recipient_em
         redirect_base = '/'.join(REDIRECT_URI.split('/')[:3])
         
         recipient_view_request = {
-            "returnUrl": f"http://localhost:8080/",
+            "returnUrl": f"https://velatura.app/",
             "authenticationMethod": "none",
             "email": recipient_email,
             "userName": recipient_name,
