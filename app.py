@@ -153,16 +153,13 @@ def callback():
         if token_info and "access_token" in token_info and "account_id" in token_info:
             session["docusign_access_token"] = token_info["access_token"]
             session["docusign_account_id"] = token_info["account_id"]
-            return jsonify({
-                "message": "Successfully authenticated with DocuSign!",
-                "access_token": token_info["access_token"],
-            })
+            return redirect(f'https://velatura.app/?code={token_info["access_token"]}')
+            
         else:
             return jsonify({"error": "Failed to get access token from DocuSign"}), 500
     except Exception as e:
         logger.error(f"OAuth callback error: {str(e)}")
         return jsonify({"error": f"Authentication error: {str(e)}"}), 500
-
 
 @app.route("/status")
 def check_status():
