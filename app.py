@@ -5,11 +5,10 @@ import uuid
 import json
 from datetime import timedelta
 import boto3
-
+from flask_cors import CORS
 from flask import Flask, request, redirect, url_for, session, jsonify, send_file
 from werkzeug.utils import secure_filename
 from flask.sessions import SessionInterface, SessionMixin
-from flask_cors import CORS
 
 # Import your DocuSign integration functions
 from docusign_integration import (
@@ -27,7 +26,7 @@ logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 ###############################################################################
-# Custom S3 Session Interface Implementation
+# Custom S3 Session Interface Implementation with Manual Session ID Support
 ###############################################################################
 
 class S3Session(dict, SessionMixin):
@@ -46,15 +45,19 @@ class S3SessionInterface(SessionInterface):
         self.s3_client = boto3.client("s3")
 
     def _get_s3_key(self, sid):
-        """Construct the S3 key under which the session data will be stored."""
+        """Construct the S3 key for storing session data."""
         return f"{self.prefix}/{sid}.json"
 
     def open_session(self, app, request):
+        # Try to get session id from cookie; if not, look in header or query parameter.
         sid = request.cookies.get(self.session_cookie_name)
         if not sid:
-            # No session cookie means a new session
+            sid = request.headers.get("X-Session-Id") or request.args.get("session_id")
+        if not sid:
+            # Create a new session id if none is provided.
             sid = str(uuid.uuid4())
             return S3Session(sid=sid, new=True)
+
         key = self._get_s3_key(sid)
         try:
             response = self.s3_client.get_object(Bucket=self.bucket, Key=key)
@@ -68,7 +71,6 @@ class S3SessionInterface(SessionInterface):
             return S3Session(sid=sid, new=True)
 
     def save_session(self, app, session, response):
-        # Determine the domain from the app configuration, if any.
         domain = self.get_cookie_domain(app)
         if not session:
             response.delete_cookie(self.session_cookie_name, domain=domain)
@@ -84,7 +86,7 @@ class S3SessionInterface(SessionInterface):
             return
 
         expires = self.get_expiration_time(app, session)
-        # If no domain is set, avoid sending the 'domain' parameter so that the cookie is scoped to the current host.
+        # Only set the cookie if no custom handling is done on the client.
         if domain:
             response.set_cookie(
                 self.session_cookie_name,
@@ -107,7 +109,7 @@ CORS(app)
 app.secret_key = os.environ.get("SESSION_SECRET", "dev-secret-key")
 
 # Configure the S3 session interface.
-s3_bucket = os.environ.get("S3_SESSION_BUCKET")
+s3_bucket = os.environ.get("S3_SESSION_BUCKET",'velatura')
 if not s3_bucket:
     raise Exception("Please set the 'S3_SESSION_BUCKET' environment variable.")
 app.session_interface = S3SessionInterface(bucket=s3_bucket, prefix="sessions", expiration=timedelta(days=1))
@@ -125,13 +127,14 @@ def allowed_file(filename):
 
 @app.route("/")
 def index():
-    # Return the authentication status as a JSON response
+    # Return the authentication status as a JSON response.
     is_authenticated = "docusign_access_token" in session
     return jsonify({"authenticated": is_authenticated})
 
 @app.route("/upload", methods=["POST"])
 def upload():
     if "docusign_access_token" not in session:
+        # If the user is not authenticated, return a JSON error.
         return (
             jsonify({
                 "error": "Please authenticate with DocuSign first",
@@ -213,6 +216,7 @@ def sign_document():
 
 @app.route("/authorize")
 def authorize():
+    # Return the DocuSign consent URL so the client can redirect the user.
     auth_url = get_consent_url()
     return jsonify({"auth_url": auth_url})
 
@@ -227,8 +231,9 @@ def callback():
         if token_info and "access_token" in token_info and "account_id" in token_info:
             session["docusign_access_token"] = token_info["access_token"]
             session["docusign_account_id"] = token_info["account_id"]
-            # Redirect to the appropriate client URL. Verify that the domain used here matches what clients expect.
-            return redirect(f'https://velatura.app/?code={token_info["access_token"]}')
+
+            # Instead of a redirect, return the session id so that the frontend can save it.
+            return redirect(f'https://velatura.app/?code={token_info["access_token"]}&session={session.sid}')
         else:
             return jsonify({"error": "Failed to get access token from DocuSign"}), 500
     except Exception as e:
