@@ -97,7 +97,7 @@ app.secret_key = os.environ.get("SESSION_SECRET", "dev-secret-key")
 
 # Configure the S3 session interface.
 # The S3 bucket for storing sessions must exist and you must have appropriate credentials.
-s3_bucket = os.environ.get("S3_SESSION_BUCKET")
+s3_bucket = os.environ.get('S3_SESSION_BUCKET', 'velatura')
 if not s3_bucket:
     raise Exception("Please set the 'S3_SESSION_BUCKET' environment variable.")
 app.session_interface = S3SessionInterface(bucket=s3_bucket, prefix="sessions", expiration=timedelta(days=1))
