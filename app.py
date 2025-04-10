@@ -1,8 +1,16 @@
 import os
 import logging
 import tempfile
+import uuid
+import json
+from datetime import timedelta
+import boto3
+
 from flask import Flask, request, redirect, url_for, session, jsonify, send_file
 from werkzeug.utils import secure_filename
+from flask.sessions import SessionInterface, SessionMixin
+
+# Import your DocuSign integration functions
 from docusign_integration import (
     get_consent_url,
     get_access_token,
@@ -17,11 +25,84 @@ from docusign_integration import (
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
+###############################################################################
+# Custom S3 Session Interface Implementation
+###############################################################################
+
+class S3Session(dict, SessionMixin):
+    def __init__(self, initial=None, sid=None, new=False):
+        self.sid = sid
+        self.new = new
+        super().__init__(initial or {})
+
+class S3SessionInterface(SessionInterface):
+    session_cookie_name = "s3session"
+
+    def __init__(self, bucket, prefix="sessions", expiration=timedelta(days=1)):
+        self.bucket = bucket
+        self.prefix = prefix
+        self.expiration = expiration
+        self.s3_client = boto3.client('s3')
+
+    def _get_s3_key(self, sid):
+        """Construct the S3 key under which the session data will be stored."""
+        return f"{self.prefix}/{sid}.json"
+
+    def open_session(self, app, request):
+        sid = request.cookies.get(self.session_cookie_name)
+        if not sid:
+            # No session cookie means a new session
+            sid = str(uuid.uuid4())
+            return S3Session(sid=sid, new=True)
+        key = self._get_s3_key(sid)
+        try:
+            response = self.s3_client.get_object(Bucket=self.bucket, Key=key)
+            session_data = response['Body'].read().decode('utf-8')
+            data = json.loads(session_data)
+            return S3Session(data, sid=sid)
+        except self.s3_client.exceptions.NoSuchKey:
+            return S3Session(sid=sid, new=True)
+        except Exception as e:
+            app.logger.error(f"Error reading session from S3: {e}")
+            return S3Session(sid=sid, new=True)
+
+    def save_session(self, app, session, response):
+        domain = self.get_cookie_domain(app)
+        if not session:
+            response.delete_cookie(self.session_cookie_name, domain=domain)
+            return
+
+        sid = session.sid
+        key = self._get_s3_key(sid)
+        session_data = json.dumps(dict(session))
+        try:
+            self.s3_client.put_object(Bucket=self.bucket, Key=key, Body=session_data)
+        except Exception as e:
+            app.logger.error(f"Error saving session to S3: {e}")
+            return
+
+        expires = self.get_expiration_time(app, session)
+        response.set_cookie(self.session_cookie_name, sid, expires=expires,
+                            httponly=True, domain=domain)
+
+###############################################################################
+# Flask App Setup and Routes
+###############################################################################
+
 # Create Flask app
 app = Flask(__name__)
+# Although app.secret_key is less critical with server-side sessions,
+# it is still used for securely signing the session cookie.
 app.secret_key = os.environ.get("SESSION_SECRET", "dev-secret-key")
 
-# Allowed file extensions
+# Configure the S3 session interface.
+# The S3 bucket for storing sessions must exist and you must have appropriate credentials.
+s3_bucket = os.environ.get("S3_SESSION_BUCKET")
+if not s3_bucket:
+    raise Exception("Please set the 'S3_SESSION_BUCKET' environment variable.")
+app.session_interface = S3SessionInterface(bucket=s3_bucket, prefix="sessions", expiration=timedelta(days=1))
+
+# Allowed file extensions for uploads
 ALLOWED_EXTENSIONS = {"pdf", "doc", "docx", "txt"}
 
 # Ensure upload directory exists
@@ -29,20 +110,17 @@ UPLOAD_FOLDER = tempfile.mkdtemp()
 app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16MB max upload
 
-
 def allowed_file(filename):
     return (
         "." in filename
         and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
     )
 
-
 @app.route("/")
 def index():
     # Return the authentication status as a JSON response
     is_authenticated = "docusign_access_token" in session
     return jsonify({"authenticated": is_authenticated})
-
 
 @app.route("/upload", methods=["POST"])
 def upload():
@@ -94,7 +172,6 @@ def upload():
         logger.error(f"Error creating envelope: {str(e)}")
         return jsonify({"error": f"Error creating envelope: {str(e)}"}), 500
 
-
 @app.route("/sign")
 def sign_document():
     if "envelope_id" not in session:
@@ -132,13 +209,11 @@ def sign_document():
         logger.error(f"Error getting signing URL: {str(e)}")
         return jsonify({"error": f"Error getting signing URL: {str(e)}"}), 500
 
-
 @app.route("/authorize")
 def authorize():
     # Generate the DocuSign consent URL and return it in JSON response.
     auth_url = get_consent_url()
     return jsonify({"auth_url": auth_url})
-
 
 @app.route("/callback")
 def callback():
@@ -154,7 +229,6 @@ def callback():
             session["docusign_access_token"] = token_info["access_token"]
             session["docusign_account_id"] = token_info["account_id"]
             return redirect(f'https://velatura.app/?code={token_info["access_token"]}')
-            
         else:
             return jsonify({"error": "Failed to get access token from DocuSign"}), 500
     except Exception as e:
@@ -182,7 +256,6 @@ def check_status():
         logger.error(f"Error checking status: {str(e)}")
         return jsonify({"error": f"Error checking status: {str(e)}"}), 500
 
-
 @app.route("/download")
 def download():
     if "envelope_id" not in session or "docusign_access_token" not in session:
@@ -209,13 +282,11 @@ def download():
         logger.error(f"Error downloading document: {str(e)}")
         return jsonify({"error": f"Error downloading document: {str(e)}"}), 500
 
-
 @app.route("/success")
 def success():
     if "envelope_id" not in session:
         return jsonify({"error": "No success information available"}), 400
     return jsonify({"message": "Document signing process completed successfully!"})
-
 
 @app.route("/logout")
 def logout():
@@ -223,17 +294,14 @@ def logout():
     session.clear()
     return jsonify({"message": "You have been logged out"})
 
-
 # JSON error handlers
 @app.errorhandler(404)
 def page_not_found(e):
     return jsonify({"error": str(e)}), 404
 
-
 @app.errorhandler(500)
 def server_error(e):
     return jsonify({"error": str(e)}), 500
-
 
 if __name__ == "__main__":
     # For local testing only. When deploying on Lambda, use a WSGI adapter like Zappa or AWS Serverless WSGI.
