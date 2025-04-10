@@ -1,0 +1,87 @@
+{% extends 'base.html' %}
+
+{% block title %}Sign Document{% endblock %}
+
+{% block head %}
+<style>
+    .signing-iframe {
+        width: 100%;
+        height: 800px;
+        border: none;
+    }
+    
+    .document-info {
+        background-color: rgba(0, 0, 0, 0.05);
+        border-radius: 5px;
+        padding: 15px;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container">
+    <div class="row justify-content-center">
+        <div class="col-lg-10">
+            <div class="card shadow-sm mb-4">
+                <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center">
+                    <h2 class="card-title mb-0">
+                        <i class="fas fa-file-signature me-2"></i>Sign Document
+                    </h2>
+                    <div>
+                        <a href="{{ url_for('check_status') }}" class="btn btn-light btn-sm">
+                            <i class="fas fa-sync-alt me-1"></i>Check Status
+                        </a>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <div class="document-info mb-4">
+                        <h5>
+                            <i class="fas fa-file-alt me-2"></i>
+                            Document: {{ document_name }}
+                        </h5>
+                        <p class="mb-0 text-muted">Follow the instructions in the DocuSign interface below to sign the document.</p>
+                    </div>
+                    
+                    <div class="signing-container">
+                        <iframe src="{{ signing_url }}" class="signing-iframe" id="signingFrame"></iframe>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="card shadow-sm">
+                <div class="card-body">
+                    <h4 class="card-title mb-3">Signing Instructions</h4>
+                    <ol class="list-group list-group-numbered">
+                        <li class="list-group-item bg-transparent">Follow the prompts in the DocuSign interface</li>
+                        <li class="list-group-item bg-transparent">Click on signature tabs to sign each required field</li>
+                        <li class="list-group-item bg-transparent">Review the document before finalizing</li>
+                        <li class="list-group-item bg-transparent">Click "Finish" when complete</li>
+                        <li class="list-group-item bg-transparent">After signing, use the "Check Status" button above to verify completion</li>
+                    </ol>
+                    
+                    <div class="d-grid gap-2 mt-3">
+                        <a href="{{ url_for('check_status') }}" class="btn btn-primary">
+                            <i class="fas fa-check-circle me-2"></i>I've Completed Signing
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    // Listen for messages from the iframe (optional - for handling completion)
+    window.addEventListener('message', function(event) {
+        // Handle any messages from DocuSign if needed
+        console.log('Message received from DocuSign:', event.data);
+        
+        // If you receive a completion message, you could redirect
+        if (event.data && event.data.event === 'signing_complete') {
+            window.location.href = "{{ url_for('check_status') }}";
+        }
+    });
+</script>
+{% endblock %}

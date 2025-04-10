@@ -1,0 +1,56 @@
+{% extends 'base.html' %}
+
+{% block title %}Error{% endblock %}
+
+{% block content %}
+<div class="container">
+    <div class="row justify-content-center">
+        <div class="col-lg-8">
+            <div class="card text-center shadow-sm">
+                <div class="card-body py-5">
+                    <div class="mb-4">
+                        <i class="fas fa-exclamation-triangle text-danger" style="font-size: 5rem;"></i>
+                    </div>
+                    <h1 class="card-title mb-3">Oops! Something went wrong</h1>
+                    <p class="lead mb-4">
+                        {{ error if error else "We encountered an error while processing your request." }}
+                    </p>
+                    
+                    <div class="d-grid gap-2 col-md-6 mx-auto">
+                        <a href="{{ url_for('index') }}" class="btn btn-primary btn-lg">
+                            <i class="fas fa-home me-2"></i>Back to Home
+                        </a>
+                        <button onclick="window.history.back()" class="btn btn-outline-secondary mt-2">
+                            <i class="fas fa-arrow-left me-2"></i>Go Back
+                        </button>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="card mt-4 shadow-sm">
+                <div class="card-body">
+                    <h4 class="card-title mb-3">Troubleshooting Tips</h4>
+                    <ul class="list-group list-group-flush">
+                        <li class="list-group-item bg-transparent">
+                            <i class="fas fa-redo text-primary me-2"></i>
+                            Try refreshing the page and trying again
+                        </li>
+                        <li class="list-group-item bg-transparent">
+                            <i class="fas fa-sign-in-alt text-primary me-2"></i>
+                            Make sure you're authenticated with DocuSign
+                        </li>
+                        <li class="list-group-item bg-transparent">
+                            <i class="fas fa-file-alt text-primary me-2"></i>
+                            Check if your document format is supported (PDF, DOC, DOCX, TXT)
+                        </li>
+                        <li class="list-group-item bg-transparent">
+                            <i class="fas fa-envelope text-primary me-2"></i>
+                            Verify recipient email addresses are correct
+                        </li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

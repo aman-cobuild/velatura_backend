@@ -1,0 +1,93 @@
+{% extends 'base.html' %}
+
+{% block title %}Upload Document{% endblock %}
+
+{% block content %}
+<div class="container">
+    <div class="row justify-content-center">
+        <div class="col-lg-8">
+            <div class="card shadow-sm">
+                <div class="card-header bg-primary text-white">
+                    <h2 class="card-title mb-0">
+                        <i class="fas fa-upload me-2"></i>Upload Document for Signing
+                    </h2>
+                </div>
+                <div class="card-body">
+                    <form method="POST" enctype="multipart/form-data" class="needs-validation" novalidate>
+                        <div class="mb-4">
+                            <label for="document" class="form-label">Select Document</label>
+                            <input type="file" class="form-control" id="document" name="document" accept=".pdf,.doc,.docx,.txt" required>
+                            <div class="form-text">Supported formats: PDF, DOC, DOCX, TXT (Max size: 16MB)</div>
+                        </div>
+                        
+                        <div class="mb-4">
+                            <h4>Recipient Information</h4>
+                            <div class="mb-3">
+                                <label for="recipient_name" class="form-label">Recipient Name</label>
+                                <input type="text" class="form-control" id="recipient_name" name="recipient_name" required>
+                            </div>
+                            <div class="mb-3">
+                                <label for="recipient_email" class="form-label">Recipient Email</label>
+                                <input type="email" class="form-control" id="recipient_email" name="recipient_email" required>
+                            </div>
+                        </div>
+                        
+                        <div class="d-grid gap-2">
+                            <button type="submit" class="btn btn-primary">
+                                <i class="fas fa-paper-plane me-2"></i>Send for Signature
+                            </button>
+                            <a href="{{ url_for('index') }}" class="btn btn-outline-secondary mt-2">Cancel</a>
+                        </div>
+                    </form>
+                </div>
+            </div>
+            
+            <div class="card mt-4 shadow-sm">
+                <div class="card-body">
+                    <h4 class="card-title mb-3">Document Tips</h4>
+                    <ul class="list-group list-group-flush">
+                        <li class="list-group-item bg-transparent">
+                            <i class="fas fa-check-circle text-success me-2"></i>
+                            Make sure your document is complete and ready for signature
+                        </li>
+                        <li class="list-group-item bg-transparent">
+                            <i class="fas fa-check-circle text-success me-2"></i>
+                            For best results, use PDF format for your documents
+                        </li>
+                        <li class="list-group-item bg-transparent">
+                            <i class="fas fa-check-circle text-success me-2"></i>
+                            Ensure recipient information is correct before sending
+                        </li>
+                        <li class="list-group-item bg-transparent">
+                            <i class="fas fa-info-circle text-info me-2"></i>
+                            DocuSign will automatically place signature fields if none are defined
+                        </li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    // Form validation
+    (function() {
+        'use strict';
+        
+        const forms = document.querySelectorAll('.needs-validation');
+        
+        Array.from(forms).forEach(form => {
+            form.addEventListener('submit', event => {
+                if (!form.checkValidity()) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                }
+                
+                form.classList.add('was-validated');
+            }, false);
+        });
+    })();
+</script>
+{% endblock %}
