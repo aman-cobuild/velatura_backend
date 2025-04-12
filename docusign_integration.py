@@ -359,7 +359,7 @@ def get_document_for_signing(access_token, account_id, envelope_id, recipient_em
         redirect_base = '/'.join(REDIRECT_URI.split('/')[:3])
         
         recipient_view_request = {
-            "returnUrl": "https://20f813ed-0fbf-4644-8916-76abcec0fe45-00-l2yucbqqupmh.worf.replit.dev/status",
+            "returnUrl": f"{redirect_base}/status",
             "authenticationMethod": "none",
             "email": recipient_email,
             "userName": recipient_name,
