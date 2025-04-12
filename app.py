@@ -213,6 +213,7 @@ def sign_document():
     except Exception as e:
         logger.error(f"Error getting signing URL: {str(e)}")
         return jsonify({"error": f"Error getting signing URL: {str(e)}"}), 500
+    
 
 @app.route("/authorize")
 def authorize():
