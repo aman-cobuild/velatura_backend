@@ -5,7 +5,9 @@ import json
 import time
 import logging
 import tempfile
+from urllib.parse import urlparse
 from docusign_esign import ApiClient, EnvelopesApi, EnvelopeDefinition, Document, Signer, SignHere, Tabs, Recipients
+from docusign_webforms import ApiClient, FormInstanceManagementApi, FormManagementApi, CreateInstanceRequestBody,WebFormInstance
 from config import (
     DOCUSIGN_INTEGRATION_KEY,
     DOCUSIGN_SECRET_KEY,
@@ -181,6 +183,44 @@ def create_envelope(access_token, account_id, document_path, document_name, reci
         logger.error(f"Error creating envelope: {str(e)}")
         raise
 
+def create_envelope_from_web_form(access_token, account_id, web_form_url, recipient_name, recipient_email):
+    """Create an envelope for signing based on an existing DocuSign Web Form URL."""
+    try:
+        # Initialize API client
+        api_client = ApiClient()
+        api_client.host = DOCUSIGN_BASE_URL
+        api_client.set_default_header("Authorization", f"Bearer {access_token}")
+        envelopes_api = EnvelopesApi(api_client)
+
+        # Create the signer model with clientUserId for embedded signing
+        signer = Signer(
+            email=recipient_email,
+            name=recipient_name,
+            recipient_id="1",
+            routing_order="1",
+            client_user_id="1000"  # Must match in get_document_for_signing
+        )
+
+        # Define the recipients for the envelope
+        recipients = Recipients(signers=[signer])
+
+        # Create the envelope definition
+        envelope_definition = EnvelopeDefinition(
+            email_subject="Please complete this form",
+            recipients=recipients,
+            status="sent",
+            web_form_url=web_form_url,
+            documents=[]# Set the web form URL here
+        )
+
+        # Create the envelope
+        results = envelopes_api.create_envelope(account_id, envelope_definition=envelope_definition)
+
+        return results.envelope_id
+    except Exception as e:
+        logger.error(f"Error creating envelope from Web Form: {str(e)}")
+        raise
+
 def create_web_form(access_token, account_id, form_data, recipient_name, recipient_email):
     """Create a web form (without PDF) for signing"""
     try:
@@ -326,7 +366,85 @@ def create_web_form(access_token, account_id, form_data, recipient_name, recipie
         logger.error(f"Error creating web form: {str(e)}")
         raise
 
+def create_web_form_instance(access_token, account_id, form_id, client_user_id, form_values=None, expiration_offset=24, return_url=None, tags=None):
+    """
+    Creates a DocuSign Web Form instance using the Python SDK and returns the URL.
 
+    Args:
+        access_token (str): Valid OAuth access token with 'webforms_instance_write' scope.
+        account_id (str): The DocuSign account ID.
+        form_id (str): The ID of the pre-configured Web Form.
+        client_user_id (str): A unique identifier for the user session from your application.
+        form_values (dict, optional): Key-value pairs to pre-fill form fields. Defaults to None. [1]
+        expiration_offset (int, optional): Hours until the instance URL expires. Defaults to 24. [1]
+        return_url (str, optional): URL to redirect user after signing (for embedded signing). Defaults to None. [3]
+        tags (dict, optional): Key-value pairs for categorization. Defaults to None.
+
+    Returns:
+        str: The unique URL for the user to access the Web Form instance, or None if an error occurs.
+    """
+   
+    # 1. Initialize API Client for Web Forms API
+    api_client = ApiClient()
+    api_client.set_default_header("Authorization", f"Bearer {access_token}")
+
+    # Determine the correct base path for the Web Forms API
+    # It's often the base_uri *without* the /restapi suffix
+    user_info = get_user_info(access_token)
+    web_forms_api_host = None
+    if user_info:
+            default_account = next((acc for acc in user_info.get('accounts',) if acc.get('is_default')), user_info.get('accounts', [{}]) if user_info.get('accounts') else None)
+            if default_account and default_account.get('base_uri'):
+                web_forms_api_host = default_account['base_uri'] # Use the domain directly
+
+    if not web_forms_api_host:
+            # Fallback: Parse from config (less reliable)
+            parsed_uri = urlparse(DOCUSIGN_BASE_URL) # Or DOCUSIGN_AUTH_SERVER
+            web_forms_api_host = f"{parsed_uri.scheme}://{parsed_uri.netloc}"
+            logger.warning(f"Could not determine Web Forms API host from user info, falling back to derived host: {web_forms_api_host}")
+
+    api_client.host = web_forms_api_host # Set the host for the Web Forms API
+
+    # 2. Construct Request Body using SDK Model [1]
+    instance_request_body = CreateInstanceRequestBody(
+        client_user_id=client_user_id,
+        form_values=form_values if form_values else None, # SDK might handle None or require empty dict {}
+        expiration_offset=expiration_offset,
+        return_url=return_url if return_url else None,
+        tags=tags if tags else None
+        # Add other optional parameters supported by CreateInstanceRequestBody model if needed
+    )
+
+    # 3. Instantiate the Web Forms API Service
+    # Use the imported class name (e.g., FormInstanceManagementApi)
+    web_forms_api = FormInstanceManagementApi(api_client)
+
+    logger.info(f"Calling Web Forms SDK: create_form_instance for form {form_id}")
+    logger.debug(f"Request Body Model: {instance_request_body}")
+
+    # 4. Call the SDK method to create the instance [1, 3]
+    # Method name might be create_instance, create_form_instance, etc. Adjust if needed.
+    # The SDK method handles constructing the correct endpoint path internally.
+    instance_response = web_forms_api.create_instance(
+        account_id,
+        form_id,
+        create_instance_body=instance_request_body
+    )
+
+    # 5. Process the SDK Response Model (e.g., WebFormInstance) [1, 4]
+    if isinstance(instance_response, WebFormInstance) and instance_response.form_url and instance_response.instance_token:
+        form_url = instance_response.form_url
+        instance_token = instance_response.instance_token
+
+        # Construct the final URL [1, 4]
+        final_instance_url = f"{form_url}#instanceToken={instance_token}"
+        logger.info(f"Successfully created Web Form instance via SDK. URL: {final_instance_url}")
+        return final_instance_url
+    else:
+        logger.error(f"Web Forms SDK response missing formUrl or instanceToken, or unexpected type. Response: {instance_response}")
+        return None
+
+    
 def get_envelope_recipients(access_token, account_id, envelope_id):
     """Get recipient information for an envelope"""
     try:

@@ -15,7 +15,8 @@ DOCUSIGN_OAUTH_BASE_URL = 'https://account-d.docusign.com/oauth'
 DOCUSIGN_BASE_URL = 'https://demo.docusign.net/restapi'
 
 # This should be your actual application URL in production
-REDIRECT_URI = os.environ.get('REDIRECT_URI', 'https://is258vntuc.execute-api.us-east-1.amazonaws.com/dev/callback')
+# REDIRECT_URI = os.environ.get('REDIRECT_URI', 'https://is258vntuc.execute-api.us-east-1.amazonaws.com/dev/callback')
+REDIRECT_URI = os.environ.get('REDIRECT_URI', 'http://localhost:5000/callback')
 S3_SESSION_BUCKET = os.environ.get('S3_SESSION_BUCKET', 'velatura')
 
 # JWT scope for DocuSign

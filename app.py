@@ -14,7 +14,7 @@ from flask.sessions import SessionInterface, SessionMixin
 from docusign_integration import (
     get_consent_url,
     get_access_token,
-    create_envelope,
+    create_envelope,create_web_form_instance,
     get_envelope_recipients,
     get_document_for_signing,
     get_envelope_status,
@@ -24,6 +24,7 @@ from docusign_integration import (
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
+
 
 ###############################################################################
 # Custom S3 Session Interface Implementation with Manual Session ID Support
@@ -107,7 +108,7 @@ class S3SessionInterface(SessionInterface):
 app = Flask(__name__)
 CORS(app)
 app.secret_key = os.environ.get("SESSION_SECRET", "dev-secret-key")
-
+app.url_map.strict_slashes = False
 # Configure the S3 session interface.
 s3_bucket = os.environ.get("S3_SESSION_BUCKET",'velatura')
 if not s3_bucket:
@@ -131,89 +132,112 @@ def index():
     is_authenticated = "docusign_access_token" in session
     return jsonify({"authenticated": is_authenticated})
 
-@app.route("/upload", methods=["POST"])
-def upload():
+# Inside app.py
+
+@app.route("/upload", methods=['POST'])
+def upload_web_form():
     if "docusign_access_token" not in session:
-        # If the user is not authenticated, return a JSON error.
-        return (
-            jsonify({
-                "error": "Please authenticate with DocuSign first",
-                "authorize_url": url_for("authorize", _external=True),
-            }),
-            401,
-        )
+        return jsonify({
+            "error": "Please authenticate with DocuSign first",
+            "authorize_url": url_for("authorize", _external=True),
+        }), 401
 
-    # For demonstration, using a fixed file from the samples directory.
-    filename = "P11GA_26634068-consent-to-bill-and-treat.pdf"
-    filepath = os.path.join("samples", filename)
+    # Get recipient details from the request form data
+    recipient_name = request.form.get("recipient_name")
+    recipient_email = request.form.get("recipient_email")
 
-    recipient_name = request.form.get("recipient_name", "")
-    recipient_email = request.form.get("recipient_email", "")
+    if not recipient_name or not recipient_email:
+        return jsonify({"error": "Recipient name and email are required"}), 400
+
+    client_user_id = str(uuid.uuid4())
+
+    form_values_to_prefill = {
+        # Add prefill fields if needed, matching API reference names
+    }
+    if not form_values_to_prefill:
+         form_values_to_prefill = None
 
     try:
-        envelope_id = create_envelope(
-            session["docusign_access_token"],
-            session["docusign_account_id"],
-            filepath,
-            filename,
-            recipient_name,
-            recipient_email,
-        )
+        post_signing_return_url = url_for('success', _external=True) + f"?session_id={session.sid}&client_user_id={client_user_id}"
+    except RuntimeError:
+        post_signing_return_url = f"https://{request.host}/success?session_id={session.sid}&client_user_id={client_user_id}"
 
-        if envelope_id:
-            session["envelope_id"] = envelope_id
-            session["document_name"] = filename
-            session["recipient_name"] = recipient_name
-            session["recipient_email"] = recipient_email
+    # --- CHANGE: Define or get your Form ID ---
+    # Ideally, get from environment variable: os.environ.get("DOCUSIGN_FORM_ID")
+    DOCUSIGN_FORM_ID = "942b2bdfc7bc71df16ac85d8c0205879" # Hardcoded from your previous code
+    if not DOCUSIGN_FORM_ID or DOCUSIGN_FORM_ID == "YOUR_WEB_FORM_CONFIGURATION_ID":
+         logger.error("DOCUSIGN_FORM_ID is not configured correctly.")
+         return jsonify({"error": "Server configuration error: Web Form ID not set."}), 500
 
-            return jsonify({
-                "envelope_id": envelope_id,
-                "document_name": filename,
-                "recipient_name": recipient_name,
-                "recipient_email": recipient_email,
-            })
-        else:
-            return jsonify({"error": "Failed to create envelope"}), 500
-    except Exception as e:
-        logger.error(f"Error creating envelope: {str(e)}")
-        return jsonify({"error": f"Error creating envelope: {str(e)}"}), 500
+    # --- ADD LOGGING ---
+    account_id_to_use = session.get("docusign_account_id")
+    logger.info(f"Attempting to create Web Form instance:")
+    logger.info(f"  Account ID: {account_id_to_use}")
+    logger.info(f"  Form ID: {DOCUSIGN_FORM_ID}")
+    # --- END LOGGING ---
+
+    if not account_id_to_use:
+         logger.error("Account ID not found in session.")
+         return jsonify({"error": "Authentication error: Account ID missing."}), 401
+
+
+
+    instance_url = create_web_form_instance(
+        access_token=session["docusign_access_token"],
+        account_id=account_id_to_use, # Use the logged variable
+        form_id=DOCUSIGN_FORM_ID,
+        client_user_id=client_user_id,
+        form_values=form_values_to_prefill
+    )
+
+    if instance_url:
+        session["instance_url"] = instance_url
+        session["client_user_id"] = client_user_id
+        session["recipient_name"] = recipient_name
+        session["recipient_email"] = recipient_email
+        session.pop("envelope_id", None)
+        session.pop("document_name", None)
+        session.pop("web_form_url", None)
+
+        logger.info(f"Web Form instance created successfully. URL: {instance_url}")
+        return jsonify({
+            "instance_url": instance_url,
+            "message": "Web Form instance created. Redirect user to the provided URL."
+        })
+    else:
+        logger.error("Failed to create Web Form instance (instance_url was None).")
+        return jsonify({"error": "Failed to create Web Form instance"}), 500
 
 @app.route("/sign")
 def sign_document():
-    if "envelope_id" not in session:
-        return jsonify({
-            "error": "No document to sign",
-            "signing_url": "",
-            "document_name": ""
-        }), 400
+    # This route is likely NOT needed in the standard Web Forms flow.
+    # The user is redirected to the instance_url from /upload.
+    # Signing happens within the DocuSign UI after form submission (for template-based forms).
+    # Embedded signing via get_document_for_signing is typically used when *you* create the envelope via API.
+    logger.warning("Route /sign accessed, but may not be applicable for Web Forms flow.")
 
-    logger.info(f"Getting signing URL for envelope: {session['envelope_id']}")
-    app_url = request.host
-    logger.info(f"Current app URL: {app_url}")
+    if "instance_url" in session:
+         # Optionally, just return the instance URL again if the frontend needs it
+         return jsonify({
+             "message": "User should be directed to the Web Form instance URL.",
+             "instance_url": session["instance_url"]
+         })
+    else:
+         return jsonify({"error": "No active Web Form instance found in session."}), 400
 
-    try:
-        recipient_view_url = get_document_for_signing(
-            session["docusign_access_token"],
-            session["docusign_account_id"],
-            session["envelope_id"],
-            session["recipient_email"],
-            session["recipient_name"],
-        )
-        if recipient_view_url:
-            return jsonify({
-                "signing_url": recipient_view_url,
-                "document_name": session["document_name"],
-            })
-        else:
-            return jsonify({
-                "error": "Failed to get signing URL",
-                "signing_url": "",
-                "document_name": ""
-            }), 500
-    except Exception as e:
-        logger.error(f"Error getting signing URL: {str(e)}")
-        return jsonify({"error": f"Error getting signing URL: {str(e)}"}), 500
-    
+    # --- Old logic (commented out, likely remove) ---
+    # if "envelope_id" not in session:
+    #     return jsonify({"error": "No document to sign"}), 400
+    # try:
+    #     recipient_view_url = get_document_for_signing(...)
+    #     if recipient_view_url:
+    #         return jsonify({"signing_url": recipient_view_url,...})
+    #     else:
+    #         return jsonify({"error": "Failed to get signing URL"}), 500
+    # except Exception as e:
+    #     logger.error(f"Error getting signing URL: {str(e)}")
+    #     return jsonify({"error": f"Error getting signing URL: {str(e)}"}), 500
+
 
 @app.route("/authorize")
 def authorize():
@@ -234,64 +258,132 @@ def callback():
             session["docusign_account_id"] = token_info["account_id"]
 
             # Instead of a redirect, return the session id so that the frontend can save it.
-            return redirect(f'https://velatura.app/?code={token_info["access_token"]}&session={session.sid}')
+            return redirect(f'http://localhost:8080/?code={token_info["access_token"]}&session={session.sid}')
         else:
             return jsonify({"error": "Failed to get access token from DocuSign"}), 500
     except Exception as e:
         logger.error(f"OAuth callback error: {str(e)}")
         return jsonify({"error": f"Authentication error: {str(e)}"}), 500
 
+
 @app.route("/status")
 def check_status():
-    if "envelope_id" not in session or "docusign_access_token" not in session:
-        return jsonify({"error": "No active signing session"}), 400
+    # Checking status immediately after creating an instance isn't useful,
+    # as the envelope doesn't exist yet.
+    # This endpoint would need to be called *after* the user submits the form.
+    # You'd need the envelope_id, which isn't stored in the session initially.
+    # A robust solution uses DocuSign Connect (webhooks) to get notified when the
+    # envelope is created and its status changes.
+    # Alternatively, you could poll using instance/user identifiers if the API supports it,
+    # or store the envelope ID received via Connect/polling.
+
+    logger.warning("Route /status accessed. Requires envelope_id obtained *after* Web Form submission (e.g., via Connect).")
+
+    # Example: Check if we received an envelope ID (e.g., from Connect updating the session)
+    envelope_id = request.args.get("envelopeId") # Or retrieve from session if stored by another process
+    if not envelope_id or "docusign_access_token" not in session:
+         # Check if client_user_id exists, indicating a form was likely started
+         if "client_user_id" in session:
+              return jsonify({
+                   "message": "Web Form instance initiated. Envelope status can be checked after user submission.",
+                   "status": "instance_initiated" # Custom status for frontend
+              }), 202 # Accepted
+         else:
+              return jsonify({"error": "No active signing session or envelope ID provided"}), 400
+
 
     try:
         status = get_envelope_status(
             session["docusign_access_token"],
             session["docusign_account_id"],
-            session["envelope_id"],
+            envelope_id, # Use the ID obtained post-submission
         )
+        logger.info(f"Checked status for envelope {envelope_id}: {status}")
+        return jsonify({"message": f"Document status: {status}", "status": status, "envelope_id": envelope_id})
 
-        if status == "completed":
-            return jsonify({"message": "Document has been signed!", "status": status})
-        else:
-            return jsonify({"message": f"Document status: {status}", "status": status})
     except Exception as e:
-        logger.error(f"Error checking status: {str(e)}")
+        logger.exception(f"Error checking status for envelope {envelope_id}: {str(e)}")
         return jsonify({"error": f"Error checking status: {str(e)}"}), 500
 
+# --- MODIFIED /download route ---
 @app.route("/download")
 def download():
-    if "envelope_id" not in session or "docusign_access_token" not in session:
-        return jsonify({"error": "No document to download"}), 400
+    # Similar to /status, this requires the envelope_id obtained *after* submission.
+    logger.warning("Route /download accessed. Requires envelope_id obtained *after* Web Form submission.")
+
+    envelope_id = request.args.get("envelopeId") # Expect envelope ID as query param
+    if not envelope_id or "docusign_access_token" not in session:
+        return jsonify({"error": "Envelope ID required and user must be authenticated"}), 400
 
     try:
-        doc_path = download_signed_document(
+        # Assuming download_signed_document returns bytes
+        doc_bytes = download_signed_document(
             session["docusign_access_token"],
             session["docusign_account_id"],
-            session["envelope_id"],
+            envelope_id,
+            # document_id='combined' # Or 'archive' or specific ID
         )
 
-        if doc_path:
-            return send_file(
-                doc_path,
+        if doc_bytes:
+            # Create a temporary file to send
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as temp_file:
+                temp_file.write(doc_bytes)
+                temp_file_path = temp_file.name
+
+            # Use send_file and clean up afterwards
+            response = send_file(
+                temp_file_path,
                 as_attachment=True,
-                download_name=f"signed_{session.get('document_name', 'document')}",
+                download_name=f"signed_document_{envelope_id}.pdf", # Generic name
                 mimetype="application/pdf",
             )
+            # Ensure the file is removed after sending
+            # Use response.call_on_close() if available or handle cleanup carefully
+            try:
+                 os.remove(temp_file_path)
+            except OSError as e:
+                 logger.error(f"Error removing temporary file {temp_file_path}: {e}")
+
+            return response
         else:
-            return jsonify({"error": "Failed to download document"}), 500
+            logger.error(f"Failed to download document for envelope {envelope_id} (doc_bytes is None).")
+            # Check if envelope status is 'completed' before attempting download
+            status = get_envelope_status(session["docusign_access_token"], session["docusign_account_id"], envelope_id)
+            if status!= 'completed':
+                 return jsonify({"error": f"Cannot download document. Envelope status is '{status}'."}), 400
+            else:
+                 return jsonify({"error": "Failed to download document"}), 500
     except Exception as e:
-        logger.error(f"Error downloading document: {str(e)}")
+        logger.exception(f"Error downloading document for envelope {envelope_id}: {str(e)}")
         return jsonify({"error": f"Error downloading document: {str(e)}"}), 500
+
+# Inside app.py
 
 @app.route("/success")
 def success():
-    if "envelope_id" not in session:
-        return jsonify({"error": "No success information available"}), 400
-    return jsonify({"message": "Document signing process completed successfully!"})
+    # This page is redirected to from DocuSign after signing (if configured in returnUrl)
+    # It confirms the user completed the DocuSign part of the flow.
+    client_user_id = request.args.get("client_user_id")
+    event = request.args.get("event") # DocuSign appends event query param (e.g., signing_complete)
+    envelope_id_returned = request.args.get("envelopeId") # DocuSign might return this
 
+    logger.info(f"Success/Return URL accessed. Event: {event}, ClientUserID: {client_user_id}, EnvelopeID: {envelope_id_returned}, SessionID: {session.sid}")
+
+    # You might want to trigger a status check here using envelope_id_returned if available,
+    # or update UI based on the event.
+    message = f"DocuSign process event: {event or 'completed'}."
+    if client_user_id:
+         message += f" Associated User ID: {client_user_id}."
+    if envelope_id_returned:
+         message += f" Envelope ID: {envelope_id_returned}."
+         # Optionally store the envelope ID in the session now if needed later
+         # session['last_envelope_id'] = envelope_id_returned
+
+    # Clear specific session data if the flow is considered complete for this instance
+    # session.pop("instance_url", None)
+    # session.pop("client_user_id", None)
+
+    return jsonify({"message": message, "status": event}) # Return the event status
 @app.route("/logout")
 def logout():
     session.clear()
