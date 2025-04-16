@@ -1,18 +1,20 @@
 import os
-import requests
+import requests,boto3
 import base64
 import json
 import time
 import logging
 import tempfile
 from urllib.parse import urlparse
+from docusign_webforms import ApiClient as webformApi
 from docusign_esign import ApiClient, EnvelopesApi, EnvelopeDefinition, Document, Signer, SignHere, Tabs, Recipients
-from docusign_webforms import ApiClient, FormInstanceManagementApi, FormManagementApi, CreateInstanceRequestBody,WebFormInstance
+from docusign_webforms import FormInstanceManagementApi, FormManagementApi, CreateInstanceRequestBody,WebFormInstance
 from config import (
     DOCUSIGN_INTEGRATION_KEY,
     DOCUSIGN_SECRET_KEY,
     DOCUSIGN_BASE_URL,
     DOCUSIGN_AUTH_SERVER,
+    DOCUSIGN_WEBFORM_URL,
     DOCUSIGN_OAUTH_BASE_URL,
     REDIRECT_URI,
     SCOPES
@@ -198,7 +200,8 @@ def create_envelope_from_web_form(access_token, account_id, web_form_url, recipi
             name=recipient_name,
             recipient_id="1",
             routing_order="1",
-            client_user_id="1000"  # Must match in get_document_for_signing
+            client_user_id="1000"  
+            # Must match in get_document_for_signing
         )
 
         # Define the recipients for the envelope
@@ -221,150 +224,150 @@ def create_envelope_from_web_form(access_token, account_id, web_form_url, recipi
         logger.error(f"Error creating envelope from Web Form: {str(e)}")
         raise
 
-def create_web_form(access_token, account_id, form_data, recipient_name, recipient_email):
-    """Create a web form (without PDF) for signing"""
-    try:
-        # Initialize API client
-        api_client = ApiClient()
-        api_client.host = DOCUSIGN_BASE_URL
-        api_client.set_default_header("Authorization", f"Bearer {access_token}")
+# def create_web_form(access_token, account_id, form_data, recipient_name, recipient_email):
+#     """Create a web form (without PDF) for signing"""
+#     try:
+#         # Initialize API client
+#         api_client = ApiClient()
+#         api_client.host = DOCUSIGN_BASE_URL
+#         api_client.set_default_header("Authorization", f"Bearer {access_token}")
         
-        # Create signer object
-        signer = Signer(
-            email=recipient_email,
-            name=recipient_name,
-            recipient_id="1",
-            routing_order="1",
-            client_user_id="1000"  # This must match the clientUserId in get_document_for_signing
-        )
+#         # Create signer object
+#         signer = Signer(
+#             email=recipient_email,
+#             name=recipient_name,
+#             recipient_id="1",
+#             routing_order="1",
+#             # This must match the clientUserId in get_document_for_signing
+#         )
         
-        # Create form fields based on the form_data
-        text_tabs = []
-        checkbox_tabs = []
-        radio_group_tabs = []
+#         # Create form fields based on the form_data
+#         text_tabs = []
+#         checkbox_tabs = []
+#         radio_group_tabs = []
         
-        # Create form fields based on the form data structure
-        for field in form_data:
-            field_type = field.get('type')
-            field_name = field.get('name')
-            field_label = field.get('label')
-            field_value = field.get('value', '')
-            field_required = field.get('required', False)
+#         # Create form fields based on the form data structure
+#         for field in form_data:
+#             field_type = field.get('type')
+#             field_name = field.get('name')
+#             field_label = field.get('label')
+#             field_value = field.get('value', '')
+#             field_required = field.get('required', False)
             
-            if field_type == 'text':
-                text_tab = Text(
-                    tab_label=field_name,
-                    name=field_name,
-                    value=field_value,
-                    width=300,
-                    required=field_required,
-                    font="helvetica",
-                    font_size="size14",
-                    document_id="1",
-                    page_number="1",
-                    x_position=str(field.get('x_position', 50)),
-                    y_position=str(field.get('y_position', 100 + len(text_tabs) * 50))
-                )
-                text_tabs.append(text_tab)
+#             if field_type == 'text':
+#                 text_tab = Text(
+#                     tab_label=field_name,
+#                     name=field_name,
+#                     value=field_value,
+#                     width=300,
+#                     required=field_required,
+#                     font="helvetica",
+#                     font_size="size14",
+#                     document_id="1",
+#                     page_number="1",
+#                     x_position=str(field.get('x_position', 50)),
+#                     y_position=str(field.get('y_position', 100 + len(text_tabs) * 50))
+#                 )
+#                 text_tabs.append(text_tab)
                 
-            elif field_type == 'checkbox':
-                checkbox = Checkbox(
-                    tab_label=field_name,
-                    name=field_name,
-                    selected=field.get('checked', False),
-                    required=field_required,
-                    document_id="1",
-                    page_number="1",
-                    x_position=str(field.get('x_position', 50)),
-                    y_position=str(field.get('y_position', 100 + len(checkbox_tabs) * 50))
-                )
-                checkbox_tabs.append(checkbox)
+#             elif field_type == 'checkbox':
+#                 checkbox = Checkbox(
+#                     tab_label=field_name,
+#                     name=field_name,
+#                     selected=field.get('checked', False),
+#                     required=field_required,
+#                     document_id="1",
+#                     page_number="1",
+#                     x_position=str(field.get('x_position', 50)),
+#                     y_position=str(field.get('y_position', 100 + len(checkbox_tabs) * 50))
+#                 )
+#                 checkbox_tabs.append(checkbox)
                 
-            elif field_type == 'radio':
-                # For radio buttons, we group them by group_name
-                group_name = field.get('group_name', 'group1')
+#             elif field_type == 'radio':
+#                 # For radio buttons, we group them by group_name
+#                 group_name = field.get('group_name', 'group1')
                 
-                # Check if we already have this group
-                existing_group = next((g for g in radio_group_tabs if g.group_name == group_name), None)
+#                 # Check if we already have this group
+#                 existing_group = next((g for g in radio_group_tabs if g.group_name == group_name), None)
                 
-                if existing_group:
-                    # Add radio button to existing group
-                    radio = Radio(
-                        value=field_value,
-                        selected=field.get('selected', False),
-                        document_id="1",
-                        page_number="1",
-                        x_position=str(field.get('x_position', 50)),
-                        y_position=str(field.get('y_position', 100 + len(radio_group_tabs) * 50))
-                    )
-                    existing_group.radios.append(radio)
-                else:
-                    # Create a new radio group
-                    radio = Radio(
-                        value=field_value,
-                        selected=field.get('selected', False),
-                        document_id="1",
-                        page_number="1",
-                        x_position=str(field.get('x_position', 50)),
-                        y_position=str(field.get('y_position', 100 + len(radio_group_tabs) * 50))
-                    )
+#                 if existing_group:
+#                     # Add radio button to existing group
+#                     radio = Radio(
+#                         value=field_value,
+#                         selected=field.get('selected', False),
+#                         document_id="1",
+#                         page_number="1",
+#                         x_position=str(field.get('x_position', 50)),
+#                         y_position=str(field.get('y_position', 100 + len(radio_group_tabs) * 50))
+#                     )
+#                     existing_group.radios.append(radio)
+#                 else:
+#                     # Create a new radio group
+#                     radio = Radio(
+#                         value=field_value,
+#                         selected=field.get('selected', False),
+#                         document_id="1",
+#                         page_number="1",
+#                         x_position=str(field.get('x_position', 50)),
+#                         y_position=str(field.get('y_position', 100 + len(radio_group_tabs) * 50))
+#                     )
                     
-                    radio_group = RadioGroup(
-                        group_name=group_name,
-                        radios=[radio],
-                        document_id="1",
-                        page_number="1"
-                    )
-                    radio_group_tabs.append(radio_group)
+#                     radio_group = RadioGroup(
+#                         group_name=group_name,
+#                         radios=[radio],
+#                         document_id="1",
+#                         page_number="1"
+#                     )
+#                     radio_group_tabs.append(radio_group)
                     
-        # Add signature field
-        sign_here = SignHere(
-            document_id="1",
-            page_number="1",
-            x_position="200",
-            y_position="400"
-        )
+#         # Add signature field
+#         sign_here = SignHere(
+#             document_id="1",
+#             page_number="1",
+#             x_position="200",
+#             y_position="400"
+#         )
         
-        # Create tabs instance with all form fields
-        signer.tabs = Tabs(
-            text_tabs=text_tabs,
-            checkbox_tabs=checkbox_tabs,
-            radio_group_tabs=radio_group_tabs,
-            sign_here_tabs=[sign_here]
-        )
+#         # Create tabs instance with all form fields
+#         signer.tabs = Tabs(
+#             text_tabs=text_tabs,
+#             checkbox_tabs=checkbox_tabs,
+#             radio_group_tabs=radio_group_tabs,
+#             sign_here_tabs=[sign_here]
+#         )
         
-        # Create a document for the web form
-        html_content = "<html><body><h1>Web Form</h1><p>Please fill out this form.</p></body></html>"
-        base64_html = base64.b64encode(html_content.encode('utf-8')).decode('utf-8')
+#         # Create a document for the web form
+#         html_content = "<html><body><h1>Web Form</h1><p>Please fill out this form.</p></body></html>"
+#         base64_html = base64.b64encode(html_content.encode('utf-8')).decode('utf-8')
         
-        document = Document(
-            document_base64=base64_html,
-            name="Web Form",
-            file_extension="html",
-            document_id="1",
-            transform_pdf_fields=True
-        )
+#         document = Document(
+#             document_base64=base64_html,
+#             name="Web Form",
+#             file_extension="html",
+#             document_id="1",
+#             transform_pdf_fields=True
+#         )
         
-        # Add the recipient to the envelope and set status
-        recipients = Recipients(signers=[signer])
+#         # Add the recipient to the envelope and set status
+#         recipients = Recipients(signers=[signer])
         
-        # Create the envelope definition
-        envelope_definition = EnvelopeDefinition(
-            email_subject="Please complete this web form",
-            email_blurb="Please complete this web form",
-            documents=[document],
-            recipients=recipients,
-            status="sent"
-        )
+#         # Create the envelope definition
+#         envelope_definition = EnvelopeDefinition(
+#             email_subject="Please complete this web form",
+#             email_blurb="Please complete this web form",
+#             documents=[document],
+#             recipients=recipients,
+#             status="sent"
+#         )
         
-        # Create the envelope
-        envelopes_api = EnvelopesApi(api_client)
-        results = envelopes_api.create_envelope(account_id, envelope_definition=envelope_definition)
+#         # Create the envelope
+#         envelopes_api = EnvelopesApi(api_client)
+#         results = envelopes_api.create_envelope(account_id, envelope_definition=envelope_definition)
         
-        return results.envelope_id
-    except Exception as e:
-        logger.error(f"Error creating web form: {str(e)}")
-        raise
+#         return results.envelope_id
+#     except Exception as e:
+#         logger.error(f"Error creating web form: {str(e)}")
+#         raise
 
 def create_web_form_instance(access_token, account_id, form_id, client_user_id, form_values=None, expiration_offset=24, return_url=None, tags=None):
     """
@@ -385,25 +388,25 @@ def create_web_form_instance(access_token, account_id, form_id, client_user_id, 
     """
    
     # 1. Initialize API Client for Web Forms API
-    api_client = ApiClient()
+    api_client = webformApi()
     api_client.set_default_header("Authorization", f"Bearer {access_token}")
-
+    api_client.host=DOCUSIGN_WEBFORM_URL
     # Determine the correct base path for the Web Forms API
     # It's often the base_uri *without* the /restapi suffix
-    user_info = get_user_info(access_token)
-    web_forms_api_host = None
-    if user_info:
-            default_account = next((acc for acc in user_info.get('accounts',) if acc.get('is_default')), user_info.get('accounts', [{}]) if user_info.get('accounts') else None)
-            if default_account and default_account.get('base_uri'):
-                web_forms_api_host = default_account['base_uri'] # Use the domain directly
+    # user_info = get_user_info(access_token)
+    # web_forms_api_host = None
+    # if user_info:
+    #         default_account = next((acc for acc in user_info.get('accounts',) if acc.get('is_default')), user_info.get('accounts', [{}]) if user_info.get('accounts') else None)
+    #         if default_account and default_account.get('base_uri'):
+    #             web_forms_api_host = default_account['base_uri'] # Use the domain directly
 
-    if not web_forms_api_host:
-            # Fallback: Parse from config (less reliable)
-            parsed_uri = urlparse(DOCUSIGN_BASE_URL) # Or DOCUSIGN_AUTH_SERVER
-            web_forms_api_host = f"{parsed_uri.scheme}://{parsed_uri.netloc}"
-            logger.warning(f"Could not determine Web Forms API host from user info, falling back to derived host: {web_forms_api_host}")
+    # if not web_forms_api_host:
+    #         # Fallback: Parse from config (less reliable)
+    #         parsed_uri = urlparse(DOCUSIGN_BASE_URL) # Or DOCUSIGN_AUTH_SERVER
+    #         web_forms_api_host = f"{parsed_uri.scheme}://{parsed_uri.netloc}"
+    #         logger.warning(f"Could not determine Web Forms API host from user info, falling back to derived host: {web_forms_api_host}")
 
-    api_client.host = web_forms_api_host # Set the host for the Web Forms API
+    # api_client.host = web_forms_api_host # Set the host for the Web Forms API
 
     # 2. Construct Request Body using SDK Model [1]
     instance_request_body = CreateInstanceRequestBody(
@@ -444,6 +447,24 @@ def create_web_form_instance(access_token, account_id, form_id, client_user_id, 
         logger.error(f"Web Forms SDK response missing formUrl or instanceToken, or unexpected type. Response: {instance_response}")
         return None
 
+def send_invitation_email(to_address: str, instance_url: str):
+    ses = boto3.client("ses")
+    ses.send_email(
+        Source="no‑reply@yourdomain.com",
+        Destination={"ToAddresses":[to_address]},
+        Message={
+            "Subject": {"Data":"Please complete your form"},
+            "Body": {
+                "Text": {"Data": f"Hello,\n\nPlease fill out your form here:\n{instance_url}"}
+            }
+        }
+    )
+def list_web_forms(access_token: str, account_id: str):
+    api_client = webformApi()
+    api_client.host = DOCUSIGN_WEBFORM_URL
+    api_client.set_default_header("Authorization", f"Bearer {access_token}")
+    forms_api = FormManagementApi(api_client)
+    return forms_api.get_forms(account_id)
     
 def get_envelope_recipients(access_token, account_id, envelope_id):
     """Get recipient information for an envelope"""

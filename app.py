@@ -18,7 +18,7 @@ from docusign_integration import (
     get_envelope_recipients,
     get_document_for_signing,
     get_envelope_status,
-    download_signed_document,create_web_form
+    download_signed_document,send_invitation_email
 )
 
 # Configure logging
@@ -164,7 +164,7 @@ def upload_web_form():
 
     # --- CHANGE: Define or get your Form ID ---
     # Ideally, get from environment variable: os.environ.get("DOCUSIGN_FORM_ID")
-    DOCUSIGN_FORM_ID = "942b2bdfc7bc71df16ac85d8c0205879" # Hardcoded from your previous code
+    DOCUSIGN_FORM_ID = "1bd7a348-f83f-4ccd-96a7-deaf727c1b6e" # Hardcoded from your previous code
     if not DOCUSIGN_FORM_ID or DOCUSIGN_FORM_ID == "YOUR_WEB_FORM_CONFIGURATION_ID":
          logger.error("DOCUSIGN_FORM_ID is not configured correctly.")
          return jsonify({"error": "Server configuration error: Web Form ID not set."}), 500
@@ -200,13 +200,16 @@ def upload_web_form():
         session.pop("web_form_url", None)
 
         logger.info(f"Web Form instance created successfully. URL: {instance_url}")
+        # send_invitation_email(recipient_email, instance_url)
         return jsonify({
             "instance_url": instance_url,
-            "message": "Web Form instance created. Redirect user to the provided URL."
+            "message": "Web Form instance created and invitation sent."
         })
     else:
         logger.error("Failed to create Web Form instance (instance_url was None).")
         return jsonify({"error": "Failed to create Web Form instance"}), 500
+
+
 
 @app.route("/sign")
 def sign_document():
@@ -358,6 +361,17 @@ def download():
         return jsonify({"error": f"Error downloading document: {str(e)}"}), 500
 
 # Inside app.py
+# @app.route("/forms")
+# def get_forms():
+#     if "docusign_access_token" not in session:
+#         return jsonify(error="Not authenticated"), 401
+#     forms = list_web_forms(session["docusign_access_token"],
+#                            session["docusign_account_id"])
+#     # Return only the fields you need
+#     return jsonify([
+#         {"id": f.form_id, "name": f.name}
+#         for f in forms.form_summaries or []
+#     ])
 
 @app.route("/success")
 def success():

@@ -13,6 +13,7 @@ DOCUSIGN_USER_ID = os.environ.get('DOCUSIGN_USER_ID',
 DOCUSIGN_AUTH_SERVER = 'https://account-d.docusign.com'
 DOCUSIGN_OAUTH_BASE_URL = 'https://account-d.docusign.com/oauth'
 DOCUSIGN_BASE_URL = 'https://demo.docusign.net/restapi'
+DOCUSIGN_WEBFORM_URL = 'https://apps-d.docusign.com/api/webforms'
 
 # This should be your actual application URL in production
 # REDIRECT_URI = os.environ.get('REDIRECT_URI', 'https://is258vntuc.execute-api.us-east-1.amazonaws.com/dev/callback')
@@ -20,7 +21,7 @@ REDIRECT_URI = os.environ.get('REDIRECT_URI', 'http://localhost:5000/callback')
 S3_SESSION_BUCKET = os.environ.get('S3_SESSION_BUCKET', 'velatura')
 
 # JWT scope for DocuSign
-SCOPES = ['signature', 'impersonation']
+SCOPES =  ['signature', 'impersonation','webforms_read','webforms_instance_read','webforms_instance_write']
 
 # Check if environment variables are set
 if not all([DOCUSIGN_INTEGRATION_KEY, DOCUSIGN_SECRET_KEY]):
