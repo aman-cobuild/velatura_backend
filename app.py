@@ -135,16 +135,23 @@ def index():
 # Inside app.py
 
 @app.route("/upload", methods=['POST'])
-def upload_web_form():
+def upload_method():
     if "docusign_access_token" not in session:
         return jsonify({
             "error": "Please authenticate with DocuSign first",
             "authorize_url": url_for("authorize", _external=True),
         }), 401
+    
+    #TODO- Dynamic Handling of filename
+    filename = "P11GA_26634068-consent-to-bill-and-treat.pdf"
+    filepath = os.path.join("samples", filename)
 
     # Get recipient details from the request form data
     recipient_name = request.form.get("recipient_name")
     recipient_email = request.form.get("recipient_email")
+    method = request.form.get("method")
+    session["method"] = method
+
 
     if not recipient_name or not recipient_email:
         return jsonify({"error": "Recipient name and email are required"}), 400
@@ -157,32 +164,32 @@ def upload_web_form():
     if not form_values_to_prefill:
          form_values_to_prefill = None
 
-    try:
-        post_signing_return_url = url_for('success', _external=True) + f"?session_id={session.sid}&client_user_id={client_user_id}"
-    except RuntimeError:
-        post_signing_return_url = f"https://{request.host}/success?session_id={session.sid}&client_user_id={client_user_id}"
+    # try:
+    #     post_signing_return_url = url_for('success', _external=True) + f"?session_id={session.sid}&client_user_id={client_user_id}"
+    # except RuntimeError:
+    #     post_signing_return_url = f"https://{request.host}/success?session_id={session.sid}&client_user_id={client_user_id}"
 
-    # --- CHANGE: Define or get your Form ID ---
-    # Ideally, get from environment variable: os.environ.get("DOCUSIGN_FORM_ID")
+   
     DOCUSIGN_FORM_ID = "1bd7a348-f83f-4ccd-96a7-deaf727c1b6e" # Hardcoded from your previous code
     if not DOCUSIGN_FORM_ID or DOCUSIGN_FORM_ID == "YOUR_WEB_FORM_CONFIGURATION_ID":
          logger.error("DOCUSIGN_FORM_ID is not configured correctly.")
          return jsonify({"error": "Server configuration error: Web Form ID not set."}), 500
 
     # --- ADD LOGGING ---
+    print("session-",session)
     account_id_to_use = session.get("docusign_account_id")
     logger.info(f"Attempting to create Web Form instance:")
     logger.info(f"  Account ID: {account_id_to_use}")
     logger.info(f"  Form ID: {DOCUSIGN_FORM_ID}")
+    sign_link ="http://localhost:8080/patient/sign/"+f"?session_id={session.sid}"
     # --- END LOGGING ---
 
     if not account_id_to_use:
          logger.error("Account ID not found in session.")
          return jsonify({"error": "Authentication error: Account ID missing."}), 401
 
-
-
-    instance_url = create_web_form_instance(
+    if method.lower()=="webform":
+        instance_url = create_web_form_instance(
         access_token=session["docusign_access_token"],
         account_id=account_id_to_use, # Use the logged variable
         form_id=DOCUSIGN_FORM_ID,
@@ -190,26 +197,50 @@ def upload_web_form():
         form_values=form_values_to_prefill
     )
 
-    if instance_url:
-        session["instance_url"] = instance_url
-        session["client_user_id"] = client_user_id
-        session["recipient_name"] = recipient_name
-        session["recipient_email"] = recipient_email
-        session.pop("envelope_id", None)
-        session.pop("document_name", None)
-        session.pop("web_form_url", None)
+        if instance_url:
+            session["instance_url"] = instance_url
+            session["client_user_id"] = client_user_id
+            session["recipient_name"] = recipient_name
+            session["recipient_email"] = recipient_email
+            session.pop("envelope_id", None)
+            session.pop("document_name", None)
+            session.pop("web_form_url", None)
 
-        logger.info(f"Web Form instance created successfully. URL: {instance_url}")
-        # send_invitation_email(recipient_email, instance_url)
-        return jsonify({
-            "instance_url": instance_url,
-            "message": "Web Form instance created and invitation sent."
-        })
+            logger.info(f"Web Form instance created successfully. URL: {instance_url}")
+            send_invitation_email(recipient_email, sign_link)
+            return jsonify({
+                "message": "Web Form instance created."
+            })
+        else:
+            logger.error("Failed to create Web Form instance (instance_url was None).")
+            return jsonify({"error": "Failed to create Web Form instance"}), 500
     else:
-        logger.error("Failed to create Web Form instance (instance_url was None).")
-        return jsonify({"error": "Failed to create Web Form instance"}), 500
+        try:
+            envelope_id = create_envelope(
+                session["docusign_access_token"],
+                session["docusign_account_id"],
+                filepath,
+                filename,
+                recipient_name,
+                recipient_email,
+            )
 
-
+            if envelope_id:
+                session["envelope_id"] = envelope_id
+                session["document_name"] = filename
+                session["recipient_name"] = recipient_name
+                session["recipient_email"] = recipient_email
+                
+                send_invitation_email(recipient_email, sign_link)
+                return jsonify({
+                   "message": "Document created."
+                })
+            else:
+                return jsonify({"error": "Failed to create envelope"}), 500
+        except Exception as e:
+            logger.error(f"Error creating envelope: {str(e)}")
+            return jsonify({"error": f"Error creating envelope: {str(e)}"}), 500
+    
 
 @app.route("/sign")
 def sign_document():
@@ -219,29 +250,32 @@ def sign_document():
     # Embedded signing via get_document_for_signing is typically used when *you* create the envelope via API.
     logger.warning("Route /sign accessed, but may not be applicable for Web Forms flow.")
 
-    if "instance_url" in session:
-         # Optionally, just return the instance URL again if the frontend needs it
-         return jsonify({
-             "message": "User should be directed to the Web Form instance URL.",
-             "instance_url": session["instance_url"]
-         })
+    if session["method"]=="webform":
+        # Optionally, just return the instance URL again if the frontend needs it
+        return jsonify({
+            "url": session["instance_url"]
+
+        }),200
     else:
-         return jsonify({"error": "No active Web Form instance found in session."}), 400
+        if "envelope_id" not in session:
+            return jsonify({"error": "No document to sign"}), 400
+        try:
+            signing_url = get_document_for_signing(
+            session["docusign_access_token"],
+            session["docusign_account_id"],
+            session["envelope_id"],
+            session["recipient_email"],
+            session["recipient_name"],
+        )
+            return jsonify({
+            "url": signing_url
 
-    # --- Old logic (commented out, likely remove) ---
-    # if "envelope_id" not in session:
-    #     return jsonify({"error": "No document to sign"}), 400
-    # try:
-    #     recipient_view_url = get_document_for_signing(...)
-    #     if recipient_view_url:
-    #         return jsonify({"signing_url": recipient_view_url,...})
-    #     else:
-    #         return jsonify({"error": "Failed to get signing URL"}), 500
-    # except Exception as e:
-    #     logger.error(f"Error getting signing URL: {str(e)}")
-    #     return jsonify({"error": f"Error getting signing URL: {str(e)}"}), 500
+        }),200
 
-
+        except Exception as e:
+            logger.error(f"Error getting signing URL: {str(e)}")
+            return jsonify({"error": f"Error getting signing URL: {str(e)}"}), 500
+    
 @app.route("/authorize")
 def authorize():
     # Return the DocuSign consent URL so the client can redirect the user.

@@ -2,7 +2,7 @@ import os
 import requests,boto3
 import base64
 import json
-import time
+import time,datetime
 import logging
 import tempfile
 from urllib.parse import urlparse
@@ -19,6 +19,7 @@ from config import (
     REDIRECT_URI,
     SCOPES
 )
+from botocore.exceptions import ClientError
 from docusign_esign import (
     ApiClient, EnvelopesApi, EnvelopeDefinition, Document, 
     Signer, SignHere, Tabs, Recipients, TemplatesApi, 
@@ -447,18 +448,138 @@ def create_web_form_instance(access_token, account_id, form_id, client_user_id, 
         logger.error(f"Web Forms SDK response missing formUrl or instanceToken, or unexpected type. Response: {instance_response}")
         return None
 
-def send_invitation_email(to_address: str, instance_url: str):
+
+def send_invitation_email(to_address: str, instance_url: str, sender_email: str = "cheena@cobuild.tech"):
+    """
+    Sends a professionally designed HTML email invitation with a "Sign Here" button using AWS SES.
+
+    Args:
+        to_address: The recipient's email address.
+        instance_url: The URL the "Sign Here" button should link to.
+        sender_email: The email address to send the email from (must be verified in SES).
+    """
     ses = boto3.client("ses")
-    ses.send_email(
-        Source="no‑reply@yourdomain.com",
-        Destination={"ToAddresses":[to_address]},
-        Message={
-            "Subject": {"Data":"Please complete your form"},
-            "Body": {
-                "Text": {"Data": f"Hello,\n\nPlease fill out your form here:\n{instance_url}"}
+
+    # --- HTML Email Body ---
+    # Uses inline CSS for maximum compatibility across email clients.
+    html_body = f"""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Form Completion Request</title>
+        <style>
+            /* Basic styles for email body */
+            body {{
+                font-family: Arial, Helvetica, sans-serif;
+                line-height: 1.6;
+                color: #333333;
+                margin: 0;
+                padding: 0;
+                background-color: #f4f4f4;
+            }}
+            .container {{
+                max-width: 600px;
+                margin: 20px auto;
+                padding: 30px;
+                background-color: #ffffff;
+                border-radius: 8px;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            }}
+            .header {{
+                text-align: center;
+                padding-bottom: 20px;
+                border-bottom: 1px solid #eeeeee;
+            }}
+            .content {{
+                padding: 20px 0;
+            }}
+            .button-container {{
+                text-align: center;
+                padding-top: 20px;
+            }}
+            /* Professional button style */
+            .button {{
+                display: inline-block;
+                padding: 12px 25px;
+                font-size: 16px;
+                font-weight: bold;
+                color: #ffffff;
+                background-color: #007bff; /* Professional blue */
+                border: none;
+                border-radius: 5px;
+                text-decoration: none;
+                cursor: pointer;
+                transition: background-color 0.3s ease;
+            }}
+            .button:hover {{
+                background-color: #0056b3; /* Darker blue on hover */
+            }}
+            .footer {{
+                text-align: center;
+                font-size: 12px;
+                color: #777777;
+                padding-top: 20px;
+                border-top: 1px solid #eeeeee;
+                margin-top: 20px;
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h2>Action Required: Please Complete Your Form</h2>
+            </div>
+            <div class="content">
+                <p>Hello,</p>
+                <p>You have a form that requires your attention. Please click the button below to access and complete it:</p>
+                <div class="button-container">
+                    <a href="{instance_url}" class="button">Sign Here</a>
+                </div>
+                <p>Thank you for your prompt attention to this matter.</p>
+            </div>
+            <div class="footer">
+                <p>This email was sent from our automated system. Please do not reply directly.</p>
+                <p>&copy; {datetime.datetime.now().year} Velatura</p>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+
+    # --- Plain Text Fallback ---
+    text_body = f"""
+    Hello,
+
+    You have a form that requires your attention.
+    Thank you for your prompt attention to this matter.
+
+    This email was sent from our automated system. Please do not reply directly.
+    """
+
+    try:
+        response = ses.send_email(
+            Source=sender_email,
+            Destination={"ToAddresses": [to_address]},
+            Message={
+                "Subject": {"Data": "Action Required: Please Complete Your Form"},
+                "Body": {
+                    "Text": {"Data": text_body},
+                    "Html": {"Data": html_body}
+                }
             }
-        }
-    )
+        )
+        print(f"Email sent! Message ID: {response['MessageId']}")
+        return response['MessageId']
+    except ClientError as e:
+        print(f"Error sending email: {e.response['Error']['Message']}")
+        return None
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}")
+        return None
+
+
 def list_web_forms(access_token: str, account_id: str):
     api_client = webformApi()
     api_client.host = DOCUSIGN_WEBFORM_URL
