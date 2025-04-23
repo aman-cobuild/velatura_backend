@@ -3,9 +3,9 @@ import logging
 import tempfile
 import uuid,time,requests
 import json,hmac
-import hashlib
+import hashlib,re
 import base64
-from datetime import timedelta
+from datetime import timedelta, datetime
 import boto3
 from functools import wraps
 from flask_cors import CORS
@@ -32,7 +32,7 @@ from docusign_integration import (
 )
 
 # Configure logging
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
@@ -131,7 +131,8 @@ cognito_client = boto3.client("cognito-idp", region_name=AWS_REGION)
 
 mongo_client = MongoClient(MONGO_URL)
 db = mongo_client[DB_NAME]
-db.patients.create_index("name", unique=True)
+consent_requests = db.consent_requests
+db.patients.create_index("first_name", unique=True)
 jwks = requests.get(JWKS_URL).json()
 
 
@@ -155,60 +156,131 @@ def get_secret_hash(username: str) -> str:
     ).digest()
     return base64.b64encode(dig).decode()
 
+def refresh_access_token(refresh_token):
+    try:
+        resp = cognito_client.initiate_auth(
+            ClientId=COGNITO_CLIENT_ID,
+            AuthFlow='REFRESH_TOKEN_AUTH',
+            AuthParameters={
+                'REFRESH_TOKEN': refresh_token,
+                'CLIENT_ID': COGNITO_CLIENT_ID
+            }
+        )
+        return resp['AuthenticationResult']['AccessToken']
+    except Exception as e:
+        return None  # Return None if refreshing fails
+
 def token_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         auth = request.headers.get('Authorization', None)
+        # refresh_token = session["refresh_token"]
+        # if refresh_token:
+        #     if not auth or not auth.startswith('Bearer '):
+        #         new_access_token = refresh_access_token(refresh_token)
+        #     if new_access_token:
+        #         # Update the session with new access token
+        #         session['access_token'] = new_access_token
+        #         # Use the new token to verify the user
+        #         user = verify_jwt(new_access_token)
+        # else:
         if not auth or not auth.startswith('Bearer '):
             abort(401, description="Authorization header missing or malformed")
+        
         token = auth.split()[1]
         user = verify_jwt(token)
         return f(user,*args,**kwargs)
     return decorated
 
+import botocore.exceptions
+
 @app.route('/signup', methods=['POST'])
 def signup():
     data = request.get_json() or {}
-    u, p, e, r = data.get('username'), data.get('password'), data.get('email'), data.get('role')
-    if not all([u, p, e, r]):
-        return jsonify({'error':'username,password,email,role required'}),400
-    secret_hash = get_secret_hash(u)
-    cognito_client.sign_up(
-        ClientId=COGNITO_CLIENT_ID,
-        SecretHash=secret_hash,
-        Username=u, Password=p,
-        UserAttributes=[{'Name':'email','Value':e},{'Name':'custom:role','Value':r}]
-    )
-    cognito_client.admin_confirm_sign_up(UserPoolId=COGNITO_USER_POOL_ID, Username=u)
+    username = "aman12345"  # must NOT contain '@'
+    email = data.get('email')
+    password = data.get('password')
+    role = data.get('role')
+
+    if not all([username, password, email, role]):
+        return jsonify({'error': 'username,password,email,role required'}), 400
+
+    secret_hash = get_secret_hash(username)
+    
+    # Sign up the user
+    try:
+        cognito_client.sign_up(
+            ClientId=COGNITO_CLIENT_ID,
+            Username=username,
+            Password=password,
+            SecretHash=secret_hash,
+            UserAttributes=[{'Name': 'email', 'Value': email}, {'Name': 'custom:role', 'Value': role}]
+        )
+    except botocore.exceptions.ClientError as e:
+        if e.response['Error']['Code'] == 'UsernameExistsException':
+            return jsonify({'error': 'Username already exists'}), 400
+        else:
+            raise e
+
+    # Confirm the user only if they're unconfirmed
+    try:
+        cognito_client.admin_get_user(UserPoolId=COGNITO_USER_POOL_ID, Username=username)
+        # If the user is already confirmed, skip confirming
+        pass
+    except botocore.exceptions.ClientError as e:
+        if e.response['Error']['Code'] == 'UserNotFoundException':
+            cognito_client.admin_confirm_sign_up(
+                UserPoolId=COGNITO_USER_POOL_ID,
+                Username=username
+            )
+        else:
+            raise e
+
+    # Add the user to the group
     cognito_client.admin_add_user_to_group(
-        UserPoolId=COGNITO_USER_POOL_ID, Username=u, GroupName=r
+        UserPoolId=COGNITO_USER_POOL_ID,
+        Username=username,
+        GroupName=role
     )
-    return jsonify({'message':'User signed up'}),201
+
+    return jsonify({'message': 'User signed up'}), 201
 
 @app.route('/login', methods=['POST'])
 def login():
     data = request.get_json() or {}
-    u, p = data.get('username'), data.get('password')
-    if not u or not p:
-        return jsonify({'error':'username,password required'}),400
-    secret_hash = get_secret_hash(u)
+    user_input = data.get('username')
+    pwd        = data.get('password')
+    if not user_input or not pwd:
+        return jsonify(error='username,password required'), 400
+
+    # 2) Are they logging in with email? If so, pass it as USERNAME (Cognito knows it’s an alias)
+    secret_hash = get_secret_hash(user_input)
     resp = cognito_client.initiate_auth(
-        ClientId=COGNITO_CLIENT_ID,
-        AuthFlow='USER_PASSWORD_AUTH',
-        AuthParameters={'USERNAME':u,'PASSWORD':p,'SECRET_HASH':secret_hash}
+        ClientId      = COGNITO_CLIENT_ID,
+        AuthFlow      = 'USER_PASSWORD_AUTH',
+        AuthParameters={
+            'USERNAME':    user_input,
+            'PASSWORD':    pwd,
+            'SECRET_HASH': secret_hash
+        }
     )
     auth = resp['AuthenticationResult']
-    # store in session
-    session['username']      = u
+    session['username']      = user_input
     session['access_token']  = auth['AccessToken']
     session['id_token']      = auth['IdToken']
     session['refresh_token'] = auth['RefreshToken']
-    # decode id_token to get sub
-    # payload = jwt.decode(auth['IdToken'], options={"verify_signature": False})
-    # session['sub'] = payload['sub']
-    return jsonify(resp.get('AuthenticationResult',{}))
+    
+    token = auth["AccessToken"]
+    user = verify_jwt(token)
+    return jsonify({
+        "AccessToken" : token,
+        "user" : user
+    })
 
-
+@app.route("/user")
+@token_required
+def user_details(user):
+    return jsonify({"user":user})
 # @app.route('/logout')
 # def logout():
 #     session.clear()
@@ -219,7 +291,28 @@ def index():
     is_authenticated = "docusign_access_token" in session
     return jsonify({"authenticated": is_authenticated})
 
+
 # Inside app.py
+
+@app.route("/consent-requests", methods=["GET"])
+@token_required
+def list_consent_requests(user):
+    """
+    GET /consent-requests
+    This route fetches all consent requests.
+    """
+    
+    try:
+        consent_list = []
+        # Fetch all consent requests
+        for consent in consent_requests.find():
+            consent["id"] = str(consent["_id"])  # Convert ObjectId to string
+            del consent["_id"]
+            consent_list.append(consent)
+        
+        return jsonify(consent_list), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/upload", methods=['POST'])
 @token_required
@@ -237,6 +330,16 @@ def upload_method(user):
     # Get recipient details from the request form data
     recipient_name = request.form.get("recipient_name")
     recipient_email = request.form.get("recipient_email")
+    patient_id = request.form.get('patient_id')
+    patient = db.patients.find_one({"_id": ObjectId(patient_id)})
+
+    # Check if the patient exists
+    if patient:
+        # Concatenate first and last name
+        patient_name = patient["first_name"] + " " + patient["last_name"]
+    else:
+        # Handle the case where the patient is not found
+        patient_name = None
     method = request.form.get("method")
     session["method"] = method
 
@@ -265,12 +368,13 @@ def upload_method(user):
 
     # --- ADD LOGGING ---
     print("session-",session)
+    print("user-",session)
     account_id_to_use = session.get("docusign_account_id")
-    logger.info(f"Attempting to create Web Form instance:")
+    
     logger.info(f"  Account ID: {account_id_to_use}")
     logger.info(f"  Form ID: {DOCUSIGN_FORM_ID}")
     # sign_link ="http://localhost:8080/patient/sign/"+f"?session_id={session.sid}"
-    sign_link ="https://velatura.app/patient/sign/"+f"?session_id={session.sid}"
+    sign_link ="http://localhost:8080/patient/sign/"+f"?session_id={session.sid}"
     # --- END LOGGING ---
 
     if not account_id_to_use:
@@ -294,9 +398,32 @@ def upload_method(user):
             session.pop("envelope_id", None)
             session.pop("document_name", None)
             session.pop("web_form_url", None)
+            # Create the consent request after successful upload
+            requested_date = datetime.now().strftime("%Y-%m-%d")  # Current date as requested date
+            expiration_date = (datetime.now() + timedelta(days=365)).strftime("%Y-%m-%d")  # 1 year from the current date
+            provider_name = user.username
+            consent_request = {
+                "patientName": patient_name,
+                "patientId": patient_id,  # You can fetch this dynamically from the session or database
+                "title": "General Medical Procedure Consent",
+                "requestedDate": requested_date,
+                "expirationDate": expiration_date,
+                "status": "Consent Created",  # Initial status
+                "description": "Consent for general medical procedures, including examination, assessment, and standard treatments as deemed necessary by medical staff.",
+                "provider": provider_name,  # Dynamic provider name
+                "department": "General Medicine"  # Can be dynamically passed or predefined
+            }
 
+            # Create consent request in the database
+            result = consent_requests.insert_one(consent_request)
+            consent_request["_id"] = str(result.inserted_id)
             logger.info(f"Web Form instance created successfully. URL: {instance_url}")
+            
             send_invitation_email(recipient_email, sign_link)
+            consent_requests.update_one(
+                    {"_id": ObjectId(consent_request["_id"])},
+                    {"$set": {"status": "Email Sent"}}
+                )
             return jsonify({
                 "message": "Web Form instance created."
             })
@@ -319,8 +446,31 @@ def upload_method(user):
                 session["document_name"] = filename
                 session["recipient_name"] = recipient_name
                 session["recipient_email"] = recipient_email
+                logger.info("username",user)
+                requested_date = datetime.now().strftime("%Y-%m-%d")  # Current date as requested date
+                expiration_date = (datetime.now() + timedelta(days=365)).strftime("%Y-%m-%d")  # 1 year from the current date
+                provider_name = user["username"]
+                consent_request = {
+                "patientName": patient_name,
+                "patientId": patient_id,  # You can fetch this dynamically from the session or database
+                "title": "General Medical Procedure Consent",
+                "requestedDate": requested_date,
+                "expirationDate": expiration_date,
+                "status": "Consent Created",  # Initial status
+                "description": "Consent for general medical procedures, including examination, assessment, and standard treatments as deemed necessary by medical staff.",
+                "provider": provider_name,  # Dynamic provider name
+                "department": "General Medicine"  # Can be dynamically passed or predefined
+            }
+
+                # Create consent request in the database
+                result = consent_requests.insert_one(consent_request)
+                consent_request["_id"] = str(result.inserted_id)
                 
                 send_invitation_email(recipient_email, sign_link)
+                consent_requests.update_one(
+                        {"_id": ObjectId(consent_request["_id"])},
+                        {"$set": {"status": "Email Sent"}}
+                    )
                 return jsonify({
                    "message": "Document created."
                 })
@@ -385,7 +535,7 @@ def callback():
 
             # Instead of a redirect, return the session id so that the frontend can save it.
             # return redirect(f'http://localhost:8080/?code={token_info["access_token"]}&session={session.sid}')
-            return redirect(f'https://velatura.app/?code={token_info["access_token"]}&session={session.sid}')
+            return redirect(f'http://localhost:8080/?code={token_info["access_token"]}&session={session.sid}')
         else:
             return jsonify({"error": "Failed to get access token from DocuSign"}), 500
     except Exception as e:
@@ -542,6 +692,43 @@ def requires_auth(f):
 
     return wrapper
 
+@app.route("/patients/search", methods=["POST"])
+@token_required
+def search_patients(user):
+    """
+    POST /patients/search
+    JSON body should include:
+        - name: (optional) First name or last name
+        - dob: (optional) Date of birth in MM/DD/YYYY format
+    """
+
+    data = request.get_json(force=True)
+    name_query = data.get("name", "").strip().lower()
+    dob_query = data.get("dob", "").strip()
+
+    # Build the MongoDB query based on provided fields
+    query = {}
+
+    if name_query:
+        query["$or"] = [
+            {"first_name": {"$regex": name_query, "$options": "i"}},
+            {"last_name": {"$regex": name_query, "$options": "i"}}
+        ]
+
+    if dob_query:
+        query["date_of_birth"] = {"$regex": dob_query, "$options": "i"}
+
+    # Fetch filtered results from MongoDB
+    try:
+        patients = db.patients.find(query)
+        patient_list = [{"id": str(patient["_id"]), "first_name": patient["first_name"], 
+                         "last_name": patient["last_name"], "date_of_birth": patient["date_of_birth"],"mrn": patient["mrn"],"ssn": patient["ssn"],"mrn_oid": patient["mrn_oid"]} 
+                        for patient in patients]
+
+        return jsonify(patient_list), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/patients", methods=["POST"])
 @token_required
@@ -552,13 +739,14 @@ def create_patient(user):
     Optional: phone, address, date_of_birth
     """
     data = request.get_json(force=True)
-    for field in ("first_name", "last_name", "email"):
+    for field in ("first_name", "last_name"):
         if not data.get(field):
             return jsonify({"error": f"{field} is required"}), 400
     print("user",user)
     patient = {
         "first_name":data["first_name"],
         "last_name": data["last_name"],
+        "gender" : data["gender"],
         "ssn":data["ssn"],
         "mrn":data["mrn"],
         "mrn_oid": data["mrn_oid"],
@@ -656,6 +844,106 @@ def delete_patient(user,pid):
 
     return jsonify({"message": "Patient deleted"}), 200
 
+
+@app.route("/consent-request", methods=["POST"])
+@token_required
+def create_consent_request(user):
+    """
+    POST /consent-request
+    This route is used to create a new consent request for a patient.
+    """
+
+    data = request.get_json(force=True)
+
+    required_fields = ["patientName", "patientId", "title", "requestedDate", "expirationDate", "status", "description", "provider", "department"]
+    for field in required_fields:
+        if not data.get(field):
+            return jsonify({"error": f"{field} is required"}), 400
+    
+    consent_request = {
+        "patient_name": data["patientName"],
+        "patient_id": data["patientId"],
+        "title": data["title"],
+        "requested_date": data["requestedDate"],
+        "expiration_date": data["expirationDate"],
+        "status": data["status"],
+        "description": data["description"],
+        "provider": data["provider"],
+        "department": data["department"],
+        "created_by": user["sub"],
+        "created_at": time.time(),
+    }
+
+    try:
+        # Insert the consent request into the MongoDB collection
+        result = consent_requests.insert_one(consent_request)
+        consent_request["_id"] = str(result.inserted_id)
+        return jsonify(consent_request), 201
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/consent-request/<string:id>", methods=["GET"])
+@token_required
+def get_consent_request(user, id):
+    """
+    GET /consent-request/<id>
+    This route fetches a specific consent request by its ID.
+    """
+
+    try:
+        consent_request = consent_requests.find_one({"_id": id})
+        if not consent_request:
+            return jsonify({"error": "Consent request not found"}), 404
+        
+        consent_request["_id"] = str(consent_request["_id"])  # Convert MongoDB ObjectId to string
+        return jsonify(consent_request), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/consent-request/<string:id>", methods=["PUT"])
+@token_required
+def update_consent_request(user, id):
+    """
+    PUT /consent-request/<id>
+    This route updates the consent request by its ID.
+    """
+
+    data = request.get_json(force=True)
+    updated_fields = ["status", "expirationDate", "description"]
+
+    update_data = {}
+    for field in updated_fields:
+        if field in data:
+            update_data[field] = data[field]
+
+    if not update_data:
+        return jsonify({"error": "No valid fields to update"}), 400
+
+    try:
+        result = consent_requests.update_one({"_id": id}, {"$set": update_data})
+        if result.matched_count == 0:
+            return jsonify({"error": "Consent request not found"}), 404
+        
+        return jsonify({"message": "Consent request updated successfully"}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/consent-request/<string:id>", methods=["DELETE"])
+@token_required
+def delete_consent_request(user, id):
+    """
+    DELETE /consent-request/<id>
+    This route deletes the consent request by its ID.
+    """
+
+    try:
+        result = consent_requests.delete_one({"_id": id})
+        if result.deleted_count == 0:
+            return jsonify({"error": "Consent request not found"}), 404
+        
+        return jsonify({"message": "Consent request deleted successfully"}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 # Inside app.py
 # @app.route("/forms")
