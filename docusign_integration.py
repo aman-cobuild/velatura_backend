@@ -1,6 +1,9 @@
 import os
 import requests,boto3
 import base64
+import fitz
+import string 
+from typing import List, Tuple, Optional
 import json
 import time,datetime
 import logging
@@ -48,6 +51,97 @@ def get_consent_url():
     
     return consent_url
 
+def locate_all_signature_keywords(pdf_path: str,
+                                  keyword: str = "signature",
+                                  dash_width: float = 200,
+                                  pad_x: float = 10,
+                                  pad_y: float = 5) -> List[Tuple[int, float, float, float, float]]:
+    """
+    Search every page’s words for ALL occurrences of a specific keyword
+    (case-insensitive), stripping common leading/trailing punctuation.
+    """
+    locations = []
+    doc = None # Initialize doc to None
+    # Define punctuation to remove from ends (includes parentheses, periods, commas, semicolons)
+    punctuation_to_strip = string.punctuation # '!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~'
+    try:
+        doc = fitz.open(pdf_path)
+        keyword_lower = keyword.strip().lower()
+        if not keyword_lower:
+            print("Error: Keyword cannot be empty.")
+            return []
+
+        for p_idx, page in enumerate(doc):
+            page_num = p_idx + 1
+            words = page.get_text("words")
+
+            for (x0, y0, x1, y1, text, *_) in words:
+                # Process text: strip whitespace, convert to lower, strip punctuation from ends
+                processed_text = text.strip().lower().strip(punctuation_to_strip)
+
+                if processed_text == keyword_lower:
+                    # Found an occurrence
+                    box_x = x1 + pad_x
+                    box_y = y0 - pad_y
+                    box_w = dash_width
+                    box_h = (y1 - y0) + (pad_y * 2)
+                    locations.append((page_num, box_x, box_y, box_w, box_h))
+
+        if not locations:
+          print(f"Keyword '{keyword}' not found in the document.")
+
+        return locations
+
+    except Exception as e:
+        print(f"An error occurred while processing the PDF: {e}")
+        return [] # Return empty list on error
+    finally:
+        if doc:
+            doc.close() 
+def annotate_all_signature_boxes(pdf_path: str,
+                                 output_path: str,
+                                 keyword: str = "signature",
+                                 dash_width: float = 200,
+                                 pad_x: float = 10,
+                                 pad_y: float = 5) -> Optional[str]:
+    """
+    Detects ALL occurrences of the keyword in the PDF, draws a
+    red rectangle annotation next to each one, and saves the result.
+    """
+    all_locations = locate_all_signature_keywords(pdf_path, keyword, dash_width, pad_x, pad_y)
+
+    if not all_locations:
+        return None
+
+    doc = None
+    annotated = False
+    try:
+        doc = fitz.open(pdf_path)
+        for location in all_locations:
+            page_num, x, y, w, h = location
+            if 0 < page_num <= doc.page_count:
+                page = doc[page_num - 1]
+                rect = fitz.Rect(x, y, x + w, y + h)
+                annot = page.add_rect_annot(rect)
+                annot.set_colors(stroke=(1, 0, 0))
+                annot.set_border(width=1.5)
+                annot.update()
+                annotated = True
+            else:
+                print(f"Warning: Invalid page number {page_num} encountered.")
+
+        if annotated:
+            doc.save(output_path, garbage=4, deflate=True, clean=True)
+            return output_path
+        else:
+            print("No valid locations found to annotate.")
+            return None
+    except Exception as e:
+        print(f"An error occurred during annotation or saving: {e}")
+        return None
+    finally:
+        if doc:
+            doc.close()
 def get_access_token(code):
     """Exchange authorization code for access token"""
     try:
@@ -151,7 +245,29 @@ def create_envelope(access_token, account_id, document_path, document_name, reci
             anchor_y_offset="10"
         )
         
+        #NEW WAY OF SIGNING WITHOUT COORDINATES NEEDED--WORKING
         # If document doesn't have anchor string, use coordinates
+        # pdf_path = "sample2.pdf"
+        # output_pdf = "annotated_all_signatures_final.pdf"
+        # keyword_to_find = "signature"
+
+        # # Annotate the PDF with all found locations
+        # annotated_file_path = annotate_all_signature_boxes(
+        #     pdf_path,
+        #     output_pdf,
+        #     keyword=keyword_to_find
+        # )
+
+        # if annotated_file_path:
+        #     print(f"Annotation successful. Annotated PDF saved to: {annotated_file_path}")
+        #     locations_info = locate_all_signature_keywords(pdf_path, keyword=keyword_to_find)
+        #     if locations_info:
+        #         print(f"\nFound {len(locations_info)} instance(s) of '{keyword_to_find}':")
+        #         for i, loc in enumerate(locations_info):
+        #             page, x, y, w, h = loc
+        #             print(f"  {i+1}. Page {page}: Box coordinates: x={x:.1f}, y={y:.1f}, width={w:.1f}, height={h:.1f}")
+        # else:
+        #     print(f"\nFailed to annotate PDF. Keyword '{keyword_to_find}' might be missing or an error occurred.")
 
         width = str(194.68 - 173.0)
         height = str(651.99 - 638.25) 

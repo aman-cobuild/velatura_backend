@@ -137,7 +137,7 @@ consents_table = dynamodb.Table('consents')
 # db = mongo_client[DB_NAME]
 
 jwks = requests.get(JWKS_URL).json()
-
+s3 = boto3.client("s3")
 
 # Ensure upload directory exists
 UPLOAD_FOLDER = tempfile.mkdtemp()
@@ -317,213 +317,393 @@ def list_consent_requests(user):
         return jsonify(consent_list), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+    
+
+@app.route("/documents", methods=["GET"])
+@token_required
+def list_documents(user):
+    """
+    List all files in the S3 bucket (optionally within a specified folder)
+    so the front-end can pick an `id` and display the filename.
+    Query string:
+      ?folder=some/path/inside/bucket
+    """
+    # 1️⃣ Read optional folder prefix from query string
+    folder = "consents"
+    if folder and not folder.endswith("/"):
+        folder += "/"
+
+    # 2️⃣ List objects under that prefix
+    try:
+        resp = s3.list_objects_v2(Bucket=s3_bucket, Prefix=folder)
+        objs = resp.get("Contents", [])
+    except Exception as e:
+        return jsonify({"error": f"could not list S3 bucket: {e}"}), 500
+
+    # 3️⃣ Build response, stripping the prefix from filenames
+    docs = []
+    for idx, obj in enumerate(objs):
+        key = obj["Key"]
+        print("key>>>",key)
+        if idx == 0:
+            continue
+        # remove folder prefix if present, else fall back to basename
+        file_name = key[len(folder):] if folder else key.rsplit("/", 1)[-1]
+        docs.append({
+            "id": str(idx + 1),
+            "fileName": file_name
+        })
+
+    return jsonify(docs), 200
+
+# @app.route("/upload", methods=['POST'])
+# @token_required
+# def upload_method(user):
+#     if "docusign_access_token" not in session:
+#         return jsonify({
+#             "error": "Please authenticate with DocuSign first",
+#             "authorize_url": url_for("authorize", _external=True),
+#         }), 401
+    
+#     #TODO- Dynamic Handling of filename
+#     filename = "P11GA_26634068-consent-to-bill-and-treat.pdf"
+#     filepath = os.path.join("samples", filename)
+
+#     # Get recipient details from the request form data
+#     recipient_name = request.form.get("recipient_name")
+#     recipient_email = request.form.get("recipient_email")
+#     patient_id = request.form.get('patient_id')
+#     response = patients_table.get_item(Key={'id': patient_id})
+#     patient = response.get('Item')
+#     # Check if the patient exists
+#     if patient:
+#         # Concatenate first and last name
+#         patient_name = patient["first_name"] + " " + patient["last_name"]
+#     else:
+#         # Handle the case where the patient is not found
+#         patient_name = None
+#     method = request.form.get("method")
+#     session["method"] = method
+
+
+#     if not recipient_name or not recipient_email:
+#         return jsonify({"error": "Recipient name and email are required"}), 400
+
+#     client_user_id = str(uuid.uuid4())
+
+#     form_values_to_prefill = {
+#         # Add prefill fields if needed, matching API reference names
+#     }
+#     if not form_values_to_prefill:
+#          form_values_to_prefill = None
+
+#     # try:
+#     #     post_signing_return_url = url_for('success', _external=True) + f"?session_id={session.sid}&client_user_id={client_user_id}"
+#     # except RuntimeError:
+#     #     post_signing_return_url = f"https://{request.host}/success?session_id={session.sid}&client_user_id={client_user_id}"
+
+   
+#     DOCUSIGN_FORM_ID = "1bd7a348-f83f-4ccd-96a7-deaf727c1b6e" # Hardcoded from your previous code
+#     if not DOCUSIGN_FORM_ID or DOCUSIGN_FORM_ID == "YOUR_WEB_FORM_CONFIGURATION_ID":
+#          logger.error("DOCUSIGN_FORM_ID is not configured correctly.")
+#          return jsonify({"error": "Server configuration error: Web Form ID not set."}), 500
+
+#     # --- ADD LOGGING ---
+#     print("session-",session)
+#     print("user-",session)
+#     account_id_to_use = session.get("docusign_account_id")
+    
+#     logger.info(f"  Account ID: {account_id_to_use}")
+#     logger.info(f"  Form ID: {DOCUSIGN_FORM_ID}")
+#     # sign_link ="https://velatura.app/patient/sign/"+f"?session_id={session.sid}"
+#     sign_link ="https://velatura.app/patient/sign/"+f"?session_id={session.sid}"
+#     # --- END LOGGING ---
+
+#     if not account_id_to_use:
+#          logger.error("Account ID not found in session.")
+#          return jsonify({"error": "Authentication error: Account ID missing."}), 401
+
+#     if method.lower()=="webform":
+#         instance_url = create_web_form_instance(
+#         access_token=session["docusign_access_token"],
+#         account_id=account_id_to_use, # Use the logged variable
+#         form_id=DOCUSIGN_FORM_ID,
+#         client_user_id=client_user_id,
+#         form_values=form_values_to_prefill
+#     )
+
+#         if instance_url:
+#             session["instance_url"] = instance_url
+#             session["client_user_id"] = client_user_id
+#             session["recipient_name"] = recipient_name
+#             session["recipient_email"] = recipient_email
+#             session.pop("envelope_id", None)
+#             session.pop("document_name", None)
+#             session.pop("web_form_url", None)
+#             # Create the consent request after successful upload
+#             requested_date = datetime.now().strftime("%Y-%m-%d")  # Current date as requested date
+#             expiration_date = (datetime.now() + timedelta(days=365)).strftime("%Y-%m-%d")  # 1 year from the current date
+#             # provider_name = user.username
+#             consent_request = {
+#                 "id": str(uuid.uuid4()),
+#                 "patientName": patient_name,
+#                 "patientId": patient_id,  # You can fetch this dynamically from the session or database
+#                 "title": "General Medical Procedure Consent",
+#                 "requestedDate": requested_date,
+#                 "expirationDate": expiration_date,
+#                 "status": "Consent Created",  # Initial status
+#                 "description": "Consent for general medical procedures, including examination, assessment, and standard treatments as deemed necessary by medical staff.",
+#                 "provider": provider_name,  # Dynamic provider name
+#                 "department": "General Medicine"  # Can be dynamically passed or predefined
+#             }
+
+#             # Create consent request in the database
+#             result = consents_table.put_item(consent_request)
+#             # consent_request["id"] = str(result.inserted_id)
+#             logger.info(f"Web Form instance created successfully. URL: {instance_url}")
+            
+#             send_invitation_email(recipient_email, sign_link)
+#             consents_table.update_item(
+#                     Key={'id': consent_request["id"]}, # Specify the primary key of the item
+#                     UpdateExpression='SET #status_attr = :status_val', # Define the update action
+#                     ExpressionAttributeNames={'#status_attr': 'status'}, # Map placeholder name to actual attribute name ('status' is a reserved word sometimes)
+#                     ExpressionAttributeValues={':status_val': 'Email Sent'} # Map placeholder value to the actual value
+#                 )
+#             return jsonify({
+#                 "message": "Web Form instance created."
+#             })
+#         else:
+#             logger.error("Failed to create Web Form instance (instance_url was None).")
+#             return jsonify({"error": "Failed to create Web Form instance"}), 500
+#     else:
+#         try:
+#             envelope_id = create_envelope(
+#                 session["docusign_access_token"],
+#                 session["docusign_account_id"],
+#                 filepath,
+#                 filename,
+#                 recipient_name,
+#                 recipient_email,
+#             )
+
+#             if envelope_id:
+#                 session["envelope_id"] = envelope_id
+#                 session["document_name"] = filename
+#                 session["recipient_name"] = recipient_name
+#                 session["recipient_email"] = recipient_email
+#                 logger.info("username",user)
+#                 requested_date = datetime.now().strftime("%Y-%m-%d")  # Current date as requested date
+#                 expiration_date = (datetime.now() + timedelta(days=365)).strftime("%Y-%m-%d")  # 1 year from the current date
+#                 provider_name = user["username"]
+#                 consent_request = {
+#                 "id": str(uuid.uuid4()),
+#                 "patientName": patient_name,
+#                 "patientId": patient_id,  # You can fetch this dynamically from the session or database
+#                 "title": "General Medical Procedure Consent",
+#                 "requestedDate": requested_date,
+#                 "expirationDate": expiration_date,
+#                 "status": "Consent Created",  # Initial status
+#                 "description": "Consent for general medical procedures, including examination, assessment, and standard treatments as deemed necessary by medical staff.",
+#                 "provider": provider_name,  # Dynamic provider name
+#                 "department": "General Medicine"  # Can be dynamically passed or predefined
+#             }
+
+#                 # Create consent request in the database
+#                 result = consents_table.put_item(Item=consent_request)
+                
+#                 send_invitation_email(recipient_email, sign_link)
+#                 consents_table.update_item(
+#                     Key={'id': consent_request["id"]}, # Specify the primary key of the item
+#                     UpdateExpression='SET #status_attr = :status_val', # Define the update action
+#                     ExpressionAttributeNames={'#status_attr': 'status'}, # Map placeholder name to actual attribute name ('status' is a reserved word sometimes)
+#                     ExpressionAttributeValues={':status_val': 'Email Sent'} # Map placeholder value to the actual value
+#                 )
+#                 return jsonify({
+#                    "message": "Document created."
+#                 })
+#             else:
+#                 return jsonify({"error": "Failed to create envelope"}), 500
+#         except Exception as e:
+#             logger.error(f"Error creating envelope: {str(e)}")
+#             return jsonify({"error": f"Error creating envelope: {str(e)}"}), 500
+    
 
 @app.route("/upload", methods=['POST'])
 @token_required
 def upload_method(user):
+    # 1. Ensure DocuSign auth
     if "docusign_access_token" not in session:
         return jsonify({
             "error": "Please authenticate with DocuSign first",
             "authorize_url": url_for("authorize", _external=True),
         }), 401
-    
-    #TODO- Dynamic Handling of filename
-    filename = "P11GA_26634068-consent-to-bill-and-treat.pdf"
-    filepath = os.path.join("samples", filename)
 
-    # Get recipient details from the request form data
-    recipient_name = request.form.get("recipient_name")
+    # 2. Required form fields
+    patient_id      = request.form.get("patient_id")
+    recipient_name  = request.form.get("recipient_name")
     recipient_email = request.form.get("recipient_email")
-    patient_id = request.form.get('patient_id')
-    response = patients_table.get_item(Key={'id': patient_id})
-    patient = response.get('Item')
-    # Check if the patient exists
-    if patient:
-        # Concatenate first and last name
-        patient_name = patient["first_name"] + " " + patient["last_name"]
-    else:
-        # Handle the case where the patient is not found
-        patient_name = None
-    method = request.form.get("method")
-    session["method"] = method
+    method          = request.form.get("method", "webform").lower()
+    document_id_str = request.form.get("document_id")
 
+    if not all([patient_id, recipient_name, recipient_email, document_id_str]):
+        return jsonify({"error": "patient_id, recipient_name, recipient_email and document_id are required"}), 400
 
-    if not recipient_name or not recipient_email:
-        return jsonify({"error": "Recipient name and email are required"}), 400
+    # parse document_id
+    try:
+        document_id = int(document_id_str)
+    except ValueError:
+        return jsonify({"error": "document_id must be an integer"}), 400
 
-    client_user_id = str(uuid.uuid4())
+    # 3. Lookup patient
+    resp    = patients_table.get_item(Key={'id': patient_id})
+    patient = resp.get("Item", {})
+    patient_name = f"{patient.get('first_name','')} {patient.get('last_name','')}".strip() or None
 
-    form_values_to_prefill = {
-        # Add prefill fields if needed, matching API reference names
-    }
-    if not form_values_to_prefill:
-         form_values_to_prefill = None
+    # 4. Fetch S3 object list & pick the one at index (document_id - 1)
+    try:
+        contents = s3.list_objects_v2(Bucket=s3_bucket).get("Contents", [])
+    except Exception as e:
+        return jsonify({"error": f"Could not list S3 bucket: {e}"}), 500
 
-    # try:
-    #     post_signing_return_url = url_for('success', _external=True) + f"?session_id={session.sid}&client_user_id={client_user_id}"
-    # except RuntimeError:
-    #     post_signing_return_url = f"https://{request.host}/success?session_id={session.sid}&client_user_id={client_user_id}"
+    idx = document_id - 1
+    if idx < 0 or idx >= len(contents):
+        return jsonify({"error": f"No file for document_id {document_id}"}), 400
 
-   
-    DOCUSIGN_FORM_ID = "1bd7a348-f83f-4ccd-96a7-deaf727c1b6e" # Hardcoded from your previous code
-    if not DOCUSIGN_FORM_ID or DOCUSIGN_FORM_ID == "YOUR_WEB_FORM_CONFIGURATION_ID":
-         logger.error("DOCUSIGN_FORM_ID is not configured correctly.")
-         return jsonify({"error": "Server configuration error: Web Form ID not set."}), 500
+    obj_meta = contents[idx]
+    s3_key   = obj_meta["Key"]
+    file_name = s3_key.rsplit("/", 1)[-1]
+    upload_date = obj_meta["LastModified"].strftime("%Y-%m-%d")
 
-    # --- ADD LOGGING ---
-    print("session-",session)
-    print("user-",session)
-    account_id_to_use = session.get("docusign_account_id")
-    
-    logger.info(f"  Account ID: {account_id_to_use}")
-    logger.info(f"  Form ID: {DOCUSIGN_FORM_ID}")
-    # sign_link ="https://velatura.app/patient/sign/"+f"?session_id={session.sid}"
-    sign_link ="https://velatura.app/patient/sign/"+f"?session_id={session.sid}"
-    # --- END LOGGING ---
-
-    if not account_id_to_use:
-         logger.error("Account ID not found in session.")
-         return jsonify({"error": "Authentication error: Account ID missing."}), 401
-
-    if method.lower()=="webform":
-        instance_url = create_web_form_instance(
-        access_token=session["docusign_access_token"],
-        account_id=account_id_to_use, # Use the logged variable
-        form_id=DOCUSIGN_FORM_ID,
-        client_user_id=client_user_id,
-        form_values=form_values_to_prefill
+    # presigned URL for the FE / metadata
+    presigned_url = s3.generate_presigned_url(
+        "get_object",
+        Params={"Bucket": s3_bucket, "Key": s3_key},
+        ExpiresIn=3600
     )
 
-        if instance_url:
-            session["instance_url"] = instance_url
-            session["client_user_id"] = client_user_id
-            session["recipient_name"] = recipient_name
-            session["recipient_email"] = recipient_email
-            session.pop("envelope_id", None)
-            session.pop("document_name", None)
-            session.pop("web_form_url", None)
-            # Create the consent request after successful upload
-            requested_date = datetime.now().strftime("%Y-%m-%d")  # Current date as requested date
-            expiration_date = (datetime.now() + timedelta(days=365)).strftime("%Y-%m-%d")  # 1 year from the current date
-            # provider_name = user.username
-            consent_request = {
-                "id": str(uuid.uuid4()),
-                "patientName": patient_name,
-                "patientId": patient_id,  # You can fetch this dynamically from the session or database
-                "title": "General Medical Procedure Consent",
-                "requestedDate": requested_date,
-                "expirationDate": expiration_date,
-                "status": "Consent Created",  # Initial status
-                "description": "Consent for general medical procedures, including examination, assessment, and standard treatments as deemed necessary by medical staff.",
-                "provider": provider_name,  # Dynamic provider name
-                "department": "General Medicine"  # Can be dynamically passed or predefined
-            }
+    # 5. Prepare DocuSign parameters
+    client_user_id = str(uuid.uuid4())
+    account_id     = session.get("docusign_account_id")
+    if not account_id:
+        return jsonify({"error": "Authentication error: Account ID missing."}), 401
 
-            # Create consent request in the database
-            result = consents_table.put_item(consent_request)
-            # consent_request["id"] = str(result.inserted_id)
-            logger.info(f"Web Form instance created successfully. URL: {instance_url}")
-            
-            send_invitation_email(recipient_email, sign_link)
-            consents_table.update_item(
-                    Key={'id': consent_request["id"]}, # Specify the primary key of the item
-                    UpdateExpression='SET #status_attr = :status_val', # Define the update action
-                    ExpressionAttributeNames={'#status_attr': 'status'}, # Map placeholder name to actual attribute name ('status' is a reserved word sometimes)
-                    ExpressionAttributeValues={':status_val': 'Email Sent'} # Map placeholder value to the actual value
-                )
-            return jsonify({
-                "message": "Web Form instance created."
-            })
-        else:
-            logger.error("Failed to create Web Form instance (instance_url was None).")
-            return jsonify({"error": "Failed to create Web Form instance"}), 500
-    else:
-        try:
-            envelope_id = create_envelope(
-                session["docusign_access_token"],
-                session["docusign_account_id"],
-                filepath,
-                filename,
-                recipient_name,
-                recipient_email,
-            )
-
-            if envelope_id:
-                session["envelope_id"] = envelope_id
-                session["document_name"] = filename
-                session["recipient_name"] = recipient_name
-                session["recipient_email"] = recipient_email
-                logger.info("username",user)
-                requested_date = datetime.now().strftime("%Y-%m-%d")  # Current date as requested date
-                expiration_date = (datetime.now() + timedelta(days=365)).strftime("%Y-%m-%d")  # 1 year from the current date
-                provider_name = user["username"]
-                consent_request = {
-                "id": str(uuid.uuid4()),
-                "patientName": patient_name,
-                "patientId": patient_id,  # You can fetch this dynamically from the session or database
-                "title": "General Medical Procedure Consent",
-                "requestedDate": requested_date,
-                "expirationDate": expiration_date,
-                "status": "Consent Created",  # Initial status
-                "description": "Consent for general medical procedures, including examination, assessment, and standard treatments as deemed necessary by medical staff.",
-                "provider": provider_name,  # Dynamic provider name
-                "department": "General Medicine"  # Can be dynamically passed or predefined
-            }
-
-                # Create consent request in the database
-                result = consents_table.put_item(Item=consent_request)
-                
-                send_invitation_email(recipient_email, sign_link)
-                consents_table.update_item(
-                    Key={'id': consent_request["id"]}, # Specify the primary key of the item
-                    UpdateExpression='SET #status_attr = :status_val', # Define the update action
-                    ExpressionAttributeNames={'#status_attr': 'status'}, # Map placeholder name to actual attribute name ('status' is a reserved word sometimes)
-                    ExpressionAttributeValues={':status_val': 'Email Sent'} # Map placeholder value to the actual value
-                )
-                return jsonify({
-                   "message": "Document created."
-                })
-            else:
-                return jsonify({"error": "Failed to create envelope"}), 500
-        except Exception as e:
-            logger.error(f"Error creating envelope: {str(e)}")
-            return jsonify({"error": f"Error creating envelope: {str(e)}"}), 500
-    
-
-@app.route("/sign")
-def sign_document():
-    # This route is likely NOT needed in the standard Web Forms flow.
-    # The user is redirected to the instance_url from /upload.
-    # Signing happens within the DocuSign UI after form submission (for template-based forms).
-    # Embedded signing via get_document_for_signing is typically used when *you* create the envelope via API.
-    logger.warning("Route /sign accessed, but may not be applicable for Web Forms flow.")
-
-    if session["method"]=="webform":
-        # Optionally, just return the instance URL again if the frontend needs it
-        return jsonify({
-            "url": session["instance_url"]
-
-        }),200
-    else:
-        if "envelope_id" not in session:
-            return jsonify({"error": "No document to sign"}), 400
-        try:
-            signing_url = get_document_for_signing(
-            session["docusign_access_token"],
-            session["docusign_account_id"],
-            session["envelope_id"],
-            session["recipient_email"],
-            session["recipient_name"],
+    sign_link = None
+    envelope_id = None
+    instance_url = None
+    DOCUSIGN_FORM_ID = "1bd7a348-f83f-4ccd-96a7-deaf727c1b6e"
+    sign_link ="https://velatura.app/patient/sign/"+f"?session_id={session.sid}"
+    if method == "webform":
+        instance_url = create_web_form_instance(
+            access_token   = session["docusign_access_token"],
+            account_id     = account_id,
+            form_id        = DOCUSIGN_FORM_ID,
+            client_user_id = client_user_id,
+            form_values    = None
         )
-            return jsonify({
-            "url": signing_url
+        if not instance_url:
+            return jsonify({"error": "Failed to create Web Form instance"}), 500
+        # sign_link = instance_url
 
-        }),200
-
+    else:
+        # download the S3 file to a temp path
+        tmp_fd, tmp_path = tempfile.mkstemp(suffix=os.path.splitext(file_name)[1])
+        os.close(tmp_fd)
+        try:
+            s3.download_file(s3_bucket, s3_key, tmp_path)
         except Exception as e:
-            logger.error(f"Error getting signing URL: {str(e)}")
-            return jsonify({"error": f"Error getting signing URL: {str(e)}"}), 500
-    
+            return jsonify({"error": f"Failed to download file from S3: {e}"}), 500
+
+        envelope_id = create_envelope(
+            session["docusign_access_token"],
+            account_id,
+            tmp_path,
+            file_name,
+            recipient_name,
+            recipient_email,
+        )
+        os.remove(tmp_path)
+
+        if not envelope_id:
+            return jsonify({"error": "Failed to create envelope"}), 500
+        # sign_link = f"https://demo.docusign.net/Signing/?envelopeId={envelope_id}"
+
+    # 6. Build consent_request with dynamic document metadata
+    now = datetime.now()
+    requested_date  = now.strftime("%Y-%m-%d")
+    expiration_date = (now + timedelta(days=365)).strftime("%Y-%m-%d")
+    provider_name   = user.get("username") or user.get("sub")
+
+    documents = [{
+        "id":         document_id,
+        "fileName":   file_name,
+        "fileUrl":    presigned_url,
+        "uploadDate": upload_date
+    }]
+
+    timeline = [{
+        "date":   requested_date,
+        "time":   now.strftime("%I:%M %p"),
+        "action": "Consent request created",
+        "actor":  provider_name
+    }]
+
+    consent_request = {
+        "id":             str(uuid.uuid4()),
+        "patientName":    patient_name,
+        "patientId":      patient_id,
+        "title":          "General Medical Procedure Consent",
+        "requestedDate":  requested_date,
+        "expirationDate": expiration_date,
+        "status":         "Consent Created",
+        "description":    "Consent for general medical procedures, including examination, assessment, and standard treatments as deemed necessary by medical staff.",
+        "provider":       provider_name,
+        "department":     "General Medicine",
+        "envelopeId":     envelope_id,
+        "instanceUrl":    instance_url,
+        "documents":      documents,
+        "method":         method,
+        "timeline":       timeline,
+        "recipentEmail": recipient_email,
+        "recipentName": recipient_name,
+        "createdBy":      user["sub"],
+        "createdAt":      int(time.time())
+    }
+
+    # 7. Store in DB
+    try:
+        consents_table.put_item(Item=consent_request)
+    except Exception as e:
+        return jsonify({"error": f"DB write failed: {e}"}), 500
+
+    # 8. Send email → update status + append timeline
+    try:
+        send_invitation_email(recipient_email, sign_link)
+        email_event = {
+            "date":   datetime.now().strftime("%Y-%m-%d"),
+            "time":   datetime.now().strftime("%I:%M %p"),
+            "action": "Invitation email sent",
+            "actor":  provider_name
+        }
+        consents_table.update_item(
+            Key={"id": consent_request["id"]},
+            UpdateExpression="""
+                SET #status = :new_status,
+                    timeline = list_append(timeline, :new_event)
+            """,
+            ExpressionAttributeNames={"#status": "status"},
+            ExpressionAttributeValues={
+                ":new_status": "Email Sent",
+                ":new_event":  [email_event]
+            }
+        )
+    except Exception as e:
+        app.logger.error(f"Email/timeline update failed: {e}")
+
+    return jsonify({
+        "message": "Consent request created",
+        "id":      consent_request["id"]
+    }), 201
+
 @app.route("/authorize")
 def authorize():
     # Return the DocuSign consent URL so the client can redirect the user.
@@ -544,6 +724,7 @@ def callback():
 
             # Instead of a redirect, return the session id so that the frontend can save it.
             # return redirect(f'https://velatura.app/?code={token_info["access_token"]}&session={session.sid}')
+            print("skdjsdjkfdjkfds,",token_info)
             return redirect(f'https://velatura.app/?code={token_info["access_token"]}&session={session.sid}')
         else:
             return jsonify({"error": "Failed to get access token from DocuSign"}), 500
@@ -564,9 +745,15 @@ def check_status():
     # or store the envelope ID received via Connect/polling.
 
     logger.warning("Route /status accessed. Requires envelope_id obtained *after* Web Form submission (e.g., via Connect).")
-
+    event = str(request.query_string).split("=")[1].replace("'","")
+    print("event",event)
+    if event == "signing_complete" or event == "viewing_complete" or event == "ttl_expired":
+        return redirect(f"https://velatura.app/{event}")
     # Example: Check if we received an envelope ID (e.g., from Connect updating the session)
     envelope_id = request.args.get("envelopeId")
+
+
+    
     if not envelope_id or "docusign_access_token" not in session:
          # Check if client_user_id exists, indicating a form was likely started
          if "client_user_id" in session:
@@ -927,6 +1114,7 @@ def create_consent_request(user):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
 @app.route("/consent-request/<string:id>", methods=["GET"])
 @token_required
 def get_consent_request(user, id):
@@ -1030,6 +1218,39 @@ def delete_consent_request(user, id):
 #         for f in forms.form_summaries or []
 #     ])
 
+@app.route("/sign",methods=["POST"])
+def sign_document():
+    # This route is likely NOT needed in the standard Web Forms flow.
+    # The user is redirected to the instance_url from /upload.
+    # Signing happens within the DocuSign UI after form submission (for template-based forms).
+    # Embedded signing via get_document_for_signing is typically used when *you* create the envelope via API.
+    logger.warning("Route /sign accessed, but may not be applicable for Web Forms flow.")
+    data = request.get_json(force=True)
+    if data["method"]=="webform":
+        # Optionally, just return the instance URL again if the frontend needs it
+        return jsonify({
+            "url": data["instanceUrl"]
+
+        }),200
+    else:
+        if "envelopeId" not in data:
+            return jsonify({"error": "No document to sign"}), 400
+        try:
+            signing_url = get_document_for_signing(
+            session["docusign_access_token"],
+            session["docusign_account_id"],
+            data["envelopeId"],
+            data["recipentEmail"],
+            data["recipentName"],
+        )
+            return jsonify({
+            "url": signing_url
+
+        }),200
+
+        except Exception as e:
+            logger.error(f"Error getting signing URL: {str(e)}")
+            return jsonify({"error": f"Error getting signing URL: {str(e)}"}), 500
 @app.route("/success")
 def success():
     # This page is redirected to from DocuSign after signing (if configured in returnUrl)

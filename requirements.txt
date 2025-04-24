@@ -6,3 +6,6 @@ werkzeug
 boto3
 pymongo
 python-jose
+pymupdf
+pillow
+pytesseract
