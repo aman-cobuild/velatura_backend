@@ -16,8 +16,7 @@ DOCUSIGN_BASE_URL = 'https://demo.docusign.net/restapi'
 DOCUSIGN_WEBFORM_URL = 'https://apps-d.docusign.com/api/webforms'
 
 # This should be your actual application URL in production
-REDIRECT_URI = os.environ.get('REDIRECT_URI', 'http://localhost:5000/callback')
-# REDIRECT_URI = os.environ.get('REDIRECT_URI', 'http://localhost:5000/callback')
+REDIRECT_URI = os.environ.get('REDIRECT_URI', 'https://is258vntuc.execute-api.us-east-1.amazonaws.com/dev/callback')# REDIRECT_URI = os.environ.get('REDIRECT_URI', 'http://localhost:5000/callback')
 # S3_SESSION_BUCKET = os.environ.get('S3_SESSION_BUCKET', 'velatura')
 # Configure the S3 session interface.
 s3_bucket = os.environ.get("S3_SESSION_BUCKET",'velatura')

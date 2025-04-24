@@ -7,6 +7,7 @@ import hashlib,re
 import base64
 from datetime import timedelta, datetime
 import boto3
+from boto3.dynamodb.conditions import Attr
 from functools import wraps
 from flask_cors import CORS
 from flask import Flask, request, redirect, url_for, session, jsonify, send_file,abort
@@ -129,10 +130,12 @@ app.session_interface = S3SessionInterface(bucket=s3_bucket, prefix="sessions", 
 ALLOWED_EXTENSIONS = {"pdf", "doc", "docx", "txt"}
 cognito_client = boto3.client("cognito-idp", region_name=AWS_REGION)
 
-mongo_client = MongoClient(MONGO_URL)
-db = mongo_client[DB_NAME]
-consent_requests = db.consent_requests
-db.patients.create_index("first_name", unique=True)
+dynamodb = boto3.resource('dynamodb', region_name=AWS_REGION)
+patients_table = dynamodb.Table('patients')
+consents_table = dynamodb.Table('consents')
+# mongo_client = MongoClient(MONGO_URL)
+# db = mongo_client[DB_NAME]
+
 jwks = requests.get(JWKS_URL).json()
 
 
@@ -305,10 +308,11 @@ def list_consent_requests(user):
     try:
         consent_list = []
         # Fetch all consent requests
-        for consent in consent_requests.find():
-            consent["id"] = str(consent["_id"])  # Convert ObjectId to string
-            del consent["_id"]
-            consent_list.append(consent)
+        resp=consents_table.scan()
+            # # consent["id"] = str(consent["_id"])  # Convert ObjectId to string
+            # # del consent["_id"]
+            # consent_list.append(consent)
+        consent_list.extend(resp.get('Items', []))
         
         return jsonify(consent_list), 200
     except Exception as e:
@@ -331,8 +335,8 @@ def upload_method(user):
     recipient_name = request.form.get("recipient_name")
     recipient_email = request.form.get("recipient_email")
     patient_id = request.form.get('patient_id')
-    patient = db.patients.find_one({"_id": ObjectId(patient_id)})
-
+    response = patients_table.get_item(Key={'id': patient_id})
+    patient = response.get('Item')
     # Check if the patient exists
     if patient:
         # Concatenate first and last name
@@ -373,8 +377,8 @@ def upload_method(user):
     
     logger.info(f"  Account ID: {account_id_to_use}")
     logger.info(f"  Form ID: {DOCUSIGN_FORM_ID}")
-    # sign_link ="http://localhost:8080/patient/sign/"+f"?session_id={session.sid}"
-    sign_link ="http://localhost:8080/patient/sign/"+f"?session_id={session.sid}"
+    # sign_link ="https://velatura.app/patient/sign/"+f"?session_id={session.sid}"
+    sign_link ="https://velatura.app/patient/sign/"+f"?session_id={session.sid}"
     # --- END LOGGING ---
 
     if not account_id_to_use:
@@ -401,8 +405,9 @@ def upload_method(user):
             # Create the consent request after successful upload
             requested_date = datetime.now().strftime("%Y-%m-%d")  # Current date as requested date
             expiration_date = (datetime.now() + timedelta(days=365)).strftime("%Y-%m-%d")  # 1 year from the current date
-            provider_name = user.username
+            # provider_name = user.username
             consent_request = {
+                "id": str(uuid.uuid4()),
                 "patientName": patient_name,
                 "patientId": patient_id,  # You can fetch this dynamically from the session or database
                 "title": "General Medical Procedure Consent",
@@ -415,14 +420,16 @@ def upload_method(user):
             }
 
             # Create consent request in the database
-            result = consent_requests.insert_one(consent_request)
-            consent_request["_id"] = str(result.inserted_id)
+            result = consents_table.put_item(consent_request)
+            # consent_request["id"] = str(result.inserted_id)
             logger.info(f"Web Form instance created successfully. URL: {instance_url}")
             
             send_invitation_email(recipient_email, sign_link)
-            consent_requests.update_one(
-                    {"_id": ObjectId(consent_request["_id"])},
-                    {"$set": {"status": "Email Sent"}}
+            consents_table.update_item(
+                    Key={'id': consent_request["id"]}, # Specify the primary key of the item
+                    UpdateExpression='SET #status_attr = :status_val', # Define the update action
+                    ExpressionAttributeNames={'#status_attr': 'status'}, # Map placeholder name to actual attribute name ('status' is a reserved word sometimes)
+                    ExpressionAttributeValues={':status_val': 'Email Sent'} # Map placeholder value to the actual value
                 )
             return jsonify({
                 "message": "Web Form instance created."
@@ -451,6 +458,7 @@ def upload_method(user):
                 expiration_date = (datetime.now() + timedelta(days=365)).strftime("%Y-%m-%d")  # 1 year from the current date
                 provider_name = user["username"]
                 consent_request = {
+                "id": str(uuid.uuid4()),
                 "patientName": patient_name,
                 "patientId": patient_id,  # You can fetch this dynamically from the session or database
                 "title": "General Medical Procedure Consent",
@@ -463,14 +471,15 @@ def upload_method(user):
             }
 
                 # Create consent request in the database
-                result = consent_requests.insert_one(consent_request)
-                consent_request["_id"] = str(result.inserted_id)
+                result = consents_table.put_item(Item=consent_request)
                 
                 send_invitation_email(recipient_email, sign_link)
-                consent_requests.update_one(
-                        {"_id": ObjectId(consent_request["_id"])},
-                        {"$set": {"status": "Email Sent"}}
-                    )
+                consents_table.update_item(
+                    Key={'id': consent_request["id"]}, # Specify the primary key of the item
+                    UpdateExpression='SET #status_attr = :status_val', # Define the update action
+                    ExpressionAttributeNames={'#status_attr': 'status'}, # Map placeholder name to actual attribute name ('status' is a reserved word sometimes)
+                    ExpressionAttributeValues={':status_val': 'Email Sent'} # Map placeholder value to the actual value
+                )
                 return jsonify({
                    "message": "Document created."
                 })
@@ -534,8 +543,8 @@ def callback():
             session["docusign_account_id"] = token_info["account_id"]
 
             # Instead of a redirect, return the session id so that the frontend can save it.
-            # return redirect(f'http://localhost:8080/?code={token_info["access_token"]}&session={session.sid}')
-            return redirect(f'http://localhost:8080/?code={token_info["access_token"]}&session={session.sid}')
+            # return redirect(f'https://velatura.app/?code={token_info["access_token"]}&session={session.sid}')
+            return redirect(f'https://velatura.app/?code={token_info["access_token"]}&session={session.sid}')
         else:
             return jsonify({"error": "Failed to get access token from DocuSign"}), 500
     except Exception as e:
@@ -692,6 +701,22 @@ def requires_auth(f):
 
     return wrapper
 
+def scan_with_contains(field, substring):
+    """Helper to scan the whole table for items where `field` contains `substring`."""
+    fe = Attr(field).contains(substring)
+    items = []
+    resp = patients_table.scan(FilterExpression=fe)
+    items.extend(resp.get('Items', []))
+
+    # page through if >1MB
+    while 'LastEvaluatedKey' in resp:
+        resp = patients_table.scan(
+            FilterExpression=fe,
+            ExclusiveStartKey=resp['LastEvaluatedKey']
+        )
+        items.extend(resp.get('Items', []))
+    return items
+
 @app.route("/patients/search", methods=["POST"])
 @token_required
 def search_patients(user):
@@ -701,36 +726,63 @@ def search_patients(user):
         - name: (optional) First name or last name
         - dob: (optional) Date of birth in MM/DD/YYYY format
     """
-
     data = request.get_json(force=True)
     name_query = data.get("name", "").strip().lower()
-    dob_query = data.get("dob", "").strip()
+    # dob_query = data.get("dob", "").strip()
 
-    # Build the MongoDB query based on provided fields
-    query = {}
+    results = []
 
     if name_query:
-        query["$or"] = [
-            {"first_name": {"$regex": name_query, "$options": "i"}},
-            {"last_name": {"$regex": name_query, "$options": "i"}}
-        ]
+        name_parts = name_query.split() # Try to split into first and last name
 
-    if dob_query:
-        query["date_of_birth"] = {"$regex": dob_query, "$options": "i"}
+        # try:
+        if len(name_parts) == 2:
+            print("getting 2 name parts")
+            # Search by exact first and last name
+            response_exact = patients_table.query(
+                IndexName='first_name_lower-last_name_lower-index',
+                KeyConditionExpression='first_name_lower = :first AND last_name_lower = :last',
+                ExpressionAttributeValues={
+                    ':first': name_parts[0],
+                    ':last': name_parts[1]
+                }
+            )
+            results.extend(response_exact.get('Items', []))
+        else:
+            # Search by begins_with on the first name (partition key)
+            scan_kwargs = {
+            # FilterExpression checks if the attribute contains the substring
+            # Note: This is CASE-SENSITIVE
+            'FilterExpression': Attr("first_name").begins_with(name_query)
+        }
+            items=[]
+            done = False
+            start_key = None
+            while not done:
+                if start_key:
+                    scan_kwargs['ExclusiveStartKey'] = start_key
 
-    # Fetch filtered results from MongoDB
-    try:
-        patients = db.patients.find(query)
-        patient_list = [{"id": str(patient["_id"]), "first_name": patient["first_name"], 
-                         "last_name": patient["last_name"], "date_of_birth": patient["date_of_birth"],"mrn": patient["mrn"],"ssn": patient["ssn"],"mrn_oid": patient["mrn_oid"]} 
-                        for patient in patients]
+                response = patients_table.scan(**scan_kwargs)
+                items.extend(response.get('Items', []))
+                start_key = response.get('LastEvaluatedKey', None)
+                done = start_key is None
+                if start_key:
+                    print("Scanning next page...")
 
-        return jsonify(patient_list), 200
+            return jsonify(items)
+           
+            # results.extend(response_first.get('Items', []))
 
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+            # response_last = patients_table.query(
+            #     IndexName='first_name_lower-last_name_lower-index',
+            #     KeyConditionExpression='begins_with(last_name, :name)',
+            #     ExpressionAttributeValues={':name': name_query}
+            # )
+            # results.extend(response_last.get('Items', []))
 
-@app.route("/patients", methods=["POST"])
+        # except Exception as e:
+        #     logger.error(f"Error searching by name in DynamoDB: {e}")
+        #     return jsonify({"error": f"Error searching by name: {str(e)}"}), 500
 @token_required
 def create_patient(user):
     """
@@ -743,9 +795,13 @@ def create_patient(user):
         if not data.get(field):
             return jsonify({"error": f"{field} is required"}), 400
     print("user",user)
+    patient_id = str(uuid.uuid4())
     patient = {
+        "id":patient_id,
         "first_name":data["first_name"],
         "last_name": data["last_name"],
+        'first_name_lower': data["first_name"].lower(),
+        'last_name_lower': data["last_name"].lower(),
         "gender" : data["gender"],
         "ssn":data["ssn"],
         "mrn":data["mrn"],
@@ -753,97 +809,85 @@ def create_patient(user):
         "address":data.get("address"),
         "date_of_birth":data.get("date_of_birth"),
         "created_by":user["sub"],
-        "created_at":time.time(),
+        "created_at":int(time.time())
     }
 
     try:
-        res = db.patients.insert_one(patient)
+        patients_table.put_item(Item=patient)
+        return jsonify(patient), 201
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
-    patient["_id"] = str(res.inserted_id)
-    return jsonify(patient), 201
 
 
 @app.route("/patients", methods=["GET"])
 @token_required
 def list_patients(user):
-    """
-    GET /patients
-    Return all patients (you can filter by created_by if you prefer).
-    """
-    docs = db.patients.find({})
-    patients = []
-    for p in docs:
-        p["_id"] = str(p["_id"])
-        patients.append(p)
-    return jsonify(patients)
+    try:
+        response = patients_table.scan() # Be cautious with scan on large tables
+        patients = response.get('Items', [])
+        return jsonify(patients)
+    except Exception as e:
+        logger.error(f"Error listing patients from DynamoDB: {e}")
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/patients/<string:pid>", methods=["GET"])
 @token_required
-def get_patient(user,pid):
-    """
-    GET /patients/<pid>
-    """
+def get_patient(user, pid):
     try:
-        p = db.patients.find_one({"_id": ObjectId(pid)})
-    except:
-        return jsonify({"error": "Invalid patient ID"}), 400
-
-    if not p:
-        return jsonify({"error": "Not found"}), 404
-
-    p["_id"] = str(p["_id"])
-    return jsonify(p)
+        response = patients_table.get_item(Key={'patient_id': pid})
+        patient = response.get('Item')
+        if patient:
+            return jsonify(patient)
+        else:
+            return jsonify({"error": "Not found"}), 404
+    except Exception as e:
+        logger.error(f"Error getting patient from DynamoDB: {e}")
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/patients/<string:pid>", methods=["PUT"])
 @token_required
-def update_patient(user,pid):
-    """
-    PUT /patients/<pid>
-    Body may include any of: first_name, last_name, email, phone, address, date_of_birth
-    """
+def update_patient(user, pid):
     data = request.get_json(force=True)
-    allowed = {"first_name","last_name","email","phone","address","date_of_birth"}
-    update = {k: v for k, v in data.items() if k in allowed}
+    allowed = {"first_name", "last_name", "email", "phone", "address", "date_of_birth"}
 
-    if not update:
+    # 1) Filter only allowed fields
+    update_fields = [k for k in data if k in allowed]
+    if not update_fields:
         return jsonify({"error": "No valid fields to update"}), 400
 
+    # 2) Build the DynamoDB expressions
+    update_expression = "SET " + ", ".join(f"{field} = :{field}" for field in update_fields)
+    expression_attribute_values = {f":{field}": data[field] for field in update_fields}
+
     try:
-        res = db.patients.update_one(
-            {"_id": ObjectId(pid)},
-            {"$set": update}
+        response = patients_table.update_item(
+            Key={'patient_id': pid},
+            UpdateExpression=update_expression,
+            ExpressionAttributeValues=expression_attribute_values,
+            ReturnValues="ALL_NEW"
         )
-    except:
-        return jsonify({"error": "Invalid patient ID"}), 400
+        updated_patient = response.get('Attributes')
+        if updated_patient:
+            return jsonify(updated_patient), 200
+        else:
+            return jsonify({"error": "Patient not found"}), 404
 
-    if res.matched_count == 0:
-        return jsonify({"error": "Not found"}), 404
-
-    p = db.patients.find_one({"_id": ObjectId(pid)})
-    p["_id"] = str(p["_id"])
-    return jsonify(p)
-
-
+    except Exception as e:
+        logger.error(f"Error updating patient in DynamoDB: {e}")
+        return jsonify({"error": str(e)}), 500
 @app.route("/patients/<string:pid>", methods=["DELETE"])
 @token_required
 def delete_patient(user,pid):
-    """
-    DELETE /patients/<pid>
-    """
     try:
-        res = db.patients.delete_one({"_id": ObjectId(pid)})
-    except:
-        return jsonify({"error": "Invalid patient ID"}), 400
-
-    if res.deleted_count == 0:
-        return jsonify({"error": "Not found"}), 404
-
-    return jsonify({"message": "Patient deleted"}), 200
-
+        patients_table.delete_item(Key={'patient_id': pid},
+            ConditionExpression=Attr('patient_id').exists())
+        return jsonify({"message": "Patient deleted"}), 200
+    except Exception as e:
+        logger.error(f"Error deleting patient from DynamoDB: {e}")
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/consent-request", methods=["POST"])
 @token_required
@@ -859,8 +903,9 @@ def create_consent_request(user):
     for field in required_fields:
         if not data.get(field):
             return jsonify({"error": f"{field} is required"}), 400
-    
+    consent_id = str(uuid.uuid4())
     consent_request = {
+        "id":  consent_id,
         "patient_name": data["patientName"],
         "patient_id": data["patientId"],
         "title": data["title"],
@@ -871,14 +916,14 @@ def create_consent_request(user):
         "provider": data["provider"],
         "department": data["department"],
         "created_by": user["sub"],
-        "created_at": time.time(),
+        "created_at": int(time.time())
     }
 
     try:
         # Insert the consent request into the MongoDB collection
-        result = consent_requests.insert_one(consent_request)
-        consent_request["_id"] = str(result.inserted_id)
-        return jsonify(consent_request), 201
+        result = consents_table.put_item(consent_request)
+        # consent_request["_id"] = str(result.inserted_id)
+        return jsonify(result), 201
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -891,11 +936,14 @@ def get_consent_request(user, id):
     """
 
     try:
-        consent_request = consent_requests.find_one({"_id": id})
+        resp = consents_table.get_item(
+            Key={'id': id}
+        )
+        consent_request = resp.get('Item')
         if not consent_request:
             return jsonify({"error": "Consent request not found"}), 404
         
-        consent_request["_id"] = str(consent_request["_id"])  # Convert MongoDB ObjectId to string
+        # consent_request["_id"] = str(consent_request["_id"])  # Convert MongoDB ObjectId to string
         return jsonify(consent_request), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -905,45 +953,69 @@ def get_consent_request(user, id):
 def update_consent_request(user, id):
     """
     PUT /consent-request/<id>
-    This route updates the consent request by its ID.
+    Update the consent request by its ID in DynamoDB.
     """
-
     data = request.get_json(force=True)
-    updated_fields = ["status", "expirationDate", "description"]
+    allowed = ["status", "expirationDate", "description"]
 
-    update_data = {}
-    for field in updated_fields:
+    # Build the update payload
+    expr_parts = []
+    attr_names = {}
+    attr_values = {}
+    for field in allowed:
         if field in data:
-            update_data[field] = data[field]
+            # DynamoDB reserved-word safe aliasing
+            placeholder = f"#{field}"
+            value_key  = f":{field}"
+            expr_parts.append(f"{placeholder} = {value_key}")
+            attr_names[placeholder] = field
+            attr_values[value_key]  = data[field]
 
-    if not update_data:
+    if not expr_parts:
         return jsonify({"error": "No valid fields to update"}), 400
 
+    update_expr = "SET " + ", ".join(expr_parts)
+
     try:
-        result = consent_requests.update_one({"_id": id}, {"$set": update_data})
-        if result.matched_count == 0:
+        resp = consents_table.update_item(
+            Key={"id": id},
+            UpdateExpression=update_expr,
+            ExpressionAttributeNames=attr_names,
+            ExpressionAttributeValues=attr_values,
+            ConditionExpression=Attr('id').exists(),    # ensure item exists
+            ReturnValues="UPDATED_NEW"
+        )
+        updated = resp.get("Attributes", {})
+        return jsonify({
+            "message": "Consent request updated successfully",
+            "updatedFields": updated
+        }), 200
+
+    except ClientError as e:
+        code = e.response["Error"]["Code"]
+        if code == "ConditionalCheckFailedException":
             return jsonify({"error": "Consent request not found"}), 404
-        
-        return jsonify({"message": "Consent request updated successfully"}), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": e.response["Error"]["Message"]}), 500
 
 @app.route("/consent-request/<string:id>", methods=["DELETE"])
 @token_required
 def delete_consent_request(user, id):
     """
     DELETE /consent-request/<id>
-    This route deletes the consent request by its ID.
+    Delete the consent request by its ID in DynamoDB.
     """
-
     try:
-        result = consent_requests.delete_one({"_id": id})
-        if result.deleted_count == 0:
-            return jsonify({"error": "Consent request not found"}), 404
-        
+        consents_table.delete_item(
+            Key={'id': id},
+            ConditionExpression=Attr('id').exists()
+        )
         return jsonify({"message": "Consent request deleted successfully"}), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+
+    except ClientError as e:
+        code = e.response["Error"]["Code"]
+        if code == "ConditionalCheckFailedException":
+            return jsonify({"error": "Consent request not found"}), 404
+        return jsonify({"error": e.response["Error"]["Message"]}), 500
 
 # Inside app.py
 # @app.route("/forms")
